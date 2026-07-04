@@ -44,7 +44,8 @@ private:
 
 // STATUS(NotFound, "missing key") -> lsmkv::Status::NotFound("missing key")
 // STATUS(OK) -> lsmkv::Status::OK()
-#define STATUS(...) LSMKV_STATUS_PICK(__VA_ARGS__, LSMKV_STATUS_2, LSMKV_STATUS_1)(__VA_ARGS__)
-#define LSMKV_STATUS_PICK(_1, _2, NAME, ...) NAME
-#define LSMKV_STATUS_1(Code) (::lsmkv::Status::Code())
+// Implemented without empty __VA_ARGS__ so -Wpedantic stays clean.
+#define STATUS(...) LSMKV_STATUS_HELPER(__VA_ARGS__, 2, 1, ~)
+#define LSMKV_STATUS_HELPER(a, b, n, ...) LSMKV_STATUS_##n(a, b)
+#define LSMKV_STATUS_1(Code, _) (::lsmkv::Status::Code())
 #define LSMKV_STATUS_2(Code, msg) (::lsmkv::Status::Code(msg))
