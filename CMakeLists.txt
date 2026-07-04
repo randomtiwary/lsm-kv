@@ -21,6 +21,11 @@ target_compile_options(lsmkv_lib PRIVATE
 find_package(Threads REQUIRED)
 target_link_libraries(lsmkv_lib PUBLIC Threads::Threads)
 
+# Debug-only assertions (LSMKV_DCHECK*). Tied to the Debug *config*, not NDEBUG.
+target_compile_definitions(lsmkv_lib PUBLIC
+    $<$<CONFIG:Debug>:LSMKV_ENABLE_DCHECKS=1>
+)
+
 if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/lsmkv_example.cpp")
     add_executable(lsmkv_example examples/lsmkv_example.cpp)
     target_link_libraries(lsmkv_example PRIVATE lsmkv_lib)
