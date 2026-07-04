@@ -1,4 +1,4 @@
-#include "test_harness.hpp"
+#include "test_harness.h"
 
 TEST(smoke_harness_works) {
     expect(true, "true is true");
