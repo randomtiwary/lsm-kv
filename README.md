@@ -58,6 +58,21 @@ delete db;
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
+```
+
+### Run the example
+
+Easiest path (configures CMake if needed, builds `lsmkv_example`, runs it):
+
+```bash
+./scripts/run_example.sh
+```
+
+Manual equivalent:
+
+```bash
+cmake -S . -B build -DLSMKV_BUILD_EXAMPLES=ON
+cmake --build build --target lsmkv_example
 ./build/lsmkv_example
 ```
 
