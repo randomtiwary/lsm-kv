@@ -1,4 +1,4 @@
-#include "lsmkv/status.hpp"
+#include "lsmkv/status.h"
 
 namespace lsmkv {
 

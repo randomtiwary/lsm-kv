@@ -1,6 +1,6 @@
 
-#include "test_harness.hpp"
-#include "lsmkv/slice.hpp"
+#include "test_harness.h"
+#include "lsmkv/slice.h"
 
 TEST(slice_basic) {
     lsmkv::Slice s("hello");

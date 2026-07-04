@@ -1,4 +1,4 @@
-#include "lsmkv/coding.hpp"
+#include "lsmkv/encoding.h"
 
 #include <cstring>
 

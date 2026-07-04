@@ -11,7 +11,7 @@ option(LSMKV_BUILD_EXAMPLES "Build examples" OFF)
 
 add_library(lsmkv_lib
     src/status.cpp
-    src/coding.cpp
+    src/encoding.cpp
 )
 target_include_directories(lsmkv_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(lsmkv_lib PRIVATE
@@ -27,7 +27,7 @@ if(LSMKV_BUILD_TESTS)
         tests/test_smoke.cpp
         tests/test_status.cpp
         tests/test_slice.cpp
-        tests/test_coding.cpp
+        tests/test_encoding.cpp
     )
     target_link_libraries(lsmkv_tests PRIVATE lsmkv_lib)
     target_include_directories(lsmkv_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)

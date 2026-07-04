@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-#include "lsmkv/slice.hpp"
+#include "lsmkv/slice.h"
 
 namespace lsmkv {
 

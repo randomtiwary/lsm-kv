@@ -1,6 +1,6 @@
 
-#include "test_harness.hpp"
-#include "lsmkv/coding.hpp"
+#include "test_harness.h"
+#include "lsmkv/enencoding.h"
 
 TEST(coding_fixed) {
     std::string buf;
