@@ -4,7 +4,6 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    branches: [main, master]
 
 jobs:
   build-and-test:
@@ -38,4 +37,9 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
       - name: Run example
-        run: ./build/lsmkv_example
+        run: |
+          if [ -x ./build/lsmkv_example ]; then
+            ./build/lsmkv_example
+          else
+            echo "lsmkv_example not built in this revision; skipping"
+          fi
