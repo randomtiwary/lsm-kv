@@ -152,18 +152,37 @@ TEST(skiplist_iterator_basic) {
 
 TEST(skiplist_concurrent_iterators) {
     constexpr int kCount = 5000;
+    constexpr int kIterators = 4;
+    constexpr int kReaders = 2;
     lsmkv::SkipList<int, IntCmp> list;
     for (int i = 0; i < kCount; ++i) list.Insert(i);
 
-    std::atomic<bool> start{false};
+    // Phased synchronization:
+    //   1. Iterators (and point-readers) acquire shared locks and announce ready.
+    //   2. Only then does the writer call Insert, which must block on the exclusive
+    //      lock until every shared lock is released.
+    // Without phase 1, the writer can win the race, insert kCount+1 first, and
+    // full-table scans observe kCount+1 entries — a flaky false failure.
+    std::atomic<int> iterators_ready{0};
+    std::atomic<int> readers_ready{0};
+    std::atomic<bool> release_iterators{false};
     std::atomic<int> errors{0};
+    std::atomic<bool> writer_entered_insert{false};
+    std::atomic<bool> writer_finished{false};
+    std::atomic<bool> saw_writer_blocked{false};
     std::vector<std::thread> threads;
 
-    for (int t = 0; t < 4; ++t) {
+    for (int t = 0; t < kIterators; ++t) {
         threads.emplace_back([&, t] {
-            while (!start.load()) {
+            auto it = list.NewIterator();  // acquires shared_lock
+            iterators_ready.fetch_add(1, std::memory_order_release);
+            while (!release_iterators.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
             }
-            auto it = list.NewIterator();
+            if (writer_finished.load(std::memory_order_acquire)) {
+                // Insert must not complete while any iterator still holds its lock.
+                errors.fetch_add(1);
+            }
             if (t % 2 == 0) {
                 it.SeekToFirst();
             } else {
@@ -172,23 +191,23 @@ TEST(skiplist_concurrent_iterators) {
             int prev = -1;
             int seen = 0;
             while (it.Valid()) {
-                if (it.key() < prev) errors.fetch_add(1);
+                if (it.key() <= prev) errors.fetch_add(1);
                 prev = it.key();
                 ++seen;
                 it.Next();
             }
-            if (t % 2 == 0) {
-                if (seen != kCount) errors.fetch_add(1);
-            } else if (seen != kCount - kCount / 2) {
-                errors.fetch_add(1);
-            }
+            const int expected = (t % 2 == 0) ? kCount : (kCount - kCount / 2);
+            if (seen != expected) errors.fetch_add(1);
+            // Destroying `it` drops the shared_lock.
         });
     }
 
-    // Readers using Contains/Find should coexist with live iterators.
-    for (int t = 0; t < 2; ++t) {
+    // Point readers coexist with live iterators under shared locks.
+    for (int t = 0; t < kReaders; ++t) {
         threads.emplace_back([&] {
-            while (!start.load()) {
+            readers_ready.fetch_add(1, std::memory_order_release);
+            while (!release_iterators.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
             }
             for (int i = 0; i < 200; ++i) {
                 int out = -1;
@@ -198,24 +217,39 @@ TEST(skiplist_concurrent_iterators) {
         });
     }
 
-    // A writer started while iterators are alive must block until they finish,
-    // then observe a consistent list.
-    std::atomic<bool> writer_started{false};
-    std::atomic<bool> writer_finished{false};
     threads.emplace_back([&] {
-        while (!start.load()) {
+        while (iterators_ready.load(std::memory_order_acquire) < kIterators ||
+               readers_ready.load(std::memory_order_acquire) < kReaders) {
+            std::this_thread::yield();
         }
-        writer_started.store(true);
-        list.Insert(kCount + 1);
-        writer_finished.store(true);
+        writer_entered_insert.store(true, std::memory_order_release);
+        list.Insert(kCount + 1);  // blocks until all shared locks are dropped
+        writer_finished.store(true, std::memory_order_release);
     });
 
-    start.store(true);
+    while (iterators_ready.load(std::memory_order_acquire) < kIterators ||
+           readers_ready.load(std::memory_order_acquire) < kReaders) {
+        std::this_thread::yield();
+    }
+    // Give the writer time to block inside Insert while shared locks are held.
+    for (int spin = 0; spin < 1000; ++spin) {
+        if (writer_entered_insert.load(std::memory_order_acquire) &&
+            !writer_finished.load(std::memory_order_acquire)) {
+            saw_writer_blocked.store(true, std::memory_order_release);
+            break;
+        }
+        std::this_thread::yield();
+    }
+    expect(!writer_finished.load(std::memory_order_acquire),
+           "writer must still be blocked while iterators hold shared locks");
+
+    release_iterators.store(true, std::memory_order_release);
     for (auto& th : threads) th.join();
 
     expect_eq(errors.load(), 0, "no iterator/reader errors");
-    expect(writer_started.load(), "writer attempted insert");
+    expect(writer_entered_insert.load(), "writer attempted insert");
     expect(writer_finished.load(), "writer completed after iterators released locks");
+    expect(saw_writer_blocked.load(), "observed writer blocked behind shared locks");
     expect(list.Contains(kCount + 1), "writer insert visible");
     expect_eq(list.Size(), static_cast<std::size_t>(kCount + 1), "size includes writer insert");
 }
