@@ -7,12 +7,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(LSMKV_BUILD_TESTS "Build unit tests" ON)
-option(LSMKV_BUILD_EXAMPLES "Build examples" OFF)
+option(LSMKV_BUILD_EXAMPLES "Build examples" ON)
 
-add_library(lsmkv_lib
-    src/status.cpp
-    src/encoding.cpp
+# Pick up every translation unit under src/ automatically.
+file(GLOB LSMKV_LIB_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
+add_library(lsmkv_lib ${LSMKV_LIB_SOURCES})
 target_include_directories(lsmkv_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(lsmkv_lib PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
@@ -20,16 +21,24 @@ target_compile_options(lsmkv_lib PRIVATE
 find_package(Threads REQUIRED)
 target_link_libraries(lsmkv_lib PUBLIC Threads::Threads)
 
+if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/lsmkv_example.cpp")
+    add_executable(lsmkv_example examples/lsmkv_example.cpp)
+    target_link_libraries(lsmkv_example PRIVATE lsmkv_lib)
+endif()
+
 if(LSMKV_BUILD_TESTS)
     enable_testing()
-    add_executable(lsmkv_tests
-        tests/test_main.cpp
-        tests/test_smoke.cpp
-        tests/test_status.cpp
-        tests/test_slice.cpp
-        tests/test_encoding.cpp
+    file(GLOB LSMKV_TEST_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_*.cpp"
     )
+    add_executable(lsmkv_tests ${LSMKV_TEST_SOURCES})
     target_link_libraries(lsmkv_tests PRIVATE lsmkv_lib)
     target_include_directories(lsmkv_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_compile_options(lsmkv_tests PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    )
     add_test(NAME lsmkv_tests COMMAND lsmkv_tests)
 endif()
+
+install(TARGETS lsmkv_lib ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+install(DIRECTORY include/lsmkv DESTINATION include)
