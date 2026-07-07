@@ -93,7 +93,7 @@ Protocol (one command per line; keys/values must not contain newlines):
 |---------|----------|
 | `PING` | `+PONG` |
 | `SET <key> <value>` | `+OK` |
-| `GET <key>` | `$N` then a line with `N` bytes of value, or `$-1` if missing |
+| `GET <key>` | `$N` then a line with `N` bytes of value, or `NOT_FOUND` if missing |
 | `DEL <key>` | `+OK` |
 | `QUIT` | `+OK` (then connection closes) |
 | errors | `-ERR <message>` |
