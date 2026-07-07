@@ -11,7 +11,7 @@
 //   +OK
 //   +PONG
 //   $N                 // successful GET; next line is exactly N bytes of value
-//   $-1                // key not found
+//   NOT_FOUND          // key not found
 //   -ERR <message>
 //
 // Usage:

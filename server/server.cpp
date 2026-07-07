@@ -130,7 +130,7 @@ bool ExecuteRequest(DB* db, const std::string& line, std::string* reply) {
         std::string value;
         const Status s = db->Get(ReadOptions(), key, &value);
         if (s.IsNotFound()) {
-            AppendLine(reply, "$-1");
+            AppendLine(reply, "NOT_FOUND");
             return true;
         }
         if (!s.ok()) {

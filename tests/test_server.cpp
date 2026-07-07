@@ -145,7 +145,7 @@ TEST(server_protocol_set_get_del) {
 
     std::string reply;
     expect(lsmkv::ExecuteRequest(db.get(), "GET missing", &reply), "get miss keep");
-    expect_eq(FirstLine(reply), std::string("$-1"), "not found");
+    expect_eq(FirstLine(reply), std::string("NOT_FOUND"), "not found");
 
     expect(lsmkv::ExecuteRequest(db.get(), "SET hello world", &reply), "set");
     expect_eq(FirstLine(reply), std::string("+OK"), "set ok");
@@ -162,7 +162,7 @@ TEST(server_protocol_set_get_del) {
     expect(lsmkv::ExecuteRequest(db.get(), "DEL hello", &reply), "del");
     expect_eq(FirstLine(reply), std::string("+OK"), "del ok");
     expect(lsmkv::ExecuteRequest(db.get(), "GET hello", &reply), "get after del");
-    expect_eq(FirstLine(reply), std::string("$-1"), "gone");
+    expect_eq(FirstLine(reply), std::string("NOT_FOUND"), "gone");
 
     expect(lsmkv::ExecuteRequest(db.get(), "SET", &reply), "set usage");
     expect(FirstLine(reply).find("-ERR") == 0, "set needs key");
@@ -227,7 +227,7 @@ TEST(server_tcp_set_get_del_ping) {
 
     expect(SendAll(fd, "GET k\n"), "send get miss");
     expect(RecvLine(fd, &line, std::chrono::seconds(2)), "recv miss");
-    expect_eq(line, std::string("$-1"), "miss");
+    expect_eq(line, std::string("NOT_FOUND"), "miss");
 
     expect(SendAll(fd, "QUIT\n"), "send quit");
     expect(RecvLine(fd, &line, std::chrono::seconds(2)), "recv quit");
