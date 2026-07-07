@@ -107,8 +107,8 @@ printf 'SET hello world\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7379
 ```
 include/lsmkv/   Public headers
 src/             Implementation
-server/          TCP server (lsmkv_server)
-tests/           Exhaustive unit + integration tests
+server/          TCP server (Server class + lsmkv_server main)
+tests/           Exhaustive unit + integration tests (incl. server)
 examples/        Minimal CLI example
 docs/DESIGN.md   Design notes and PR roadmap
 ```

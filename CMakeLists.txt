@@ -32,9 +32,26 @@ if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/lsmkv_e
     target_link_libraries(lsmkv_example PRIVATE lsmkv_lib)
 endif()
 
-if(LSMKV_BUILD_SERVER AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/server/lsmkv_server.cpp")
-    add_executable(lsmkv_server server/lsmkv_server.cpp)
-    target_link_libraries(lsmkv_server PRIVATE lsmkv_lib)
+# Server library is built when the binary and/or tests need it.
+set(LSMKV_NEED_SERVER_LIB OFF)
+if(LSMKV_BUILD_SERVER OR LSMKV_BUILD_TESTS)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/server/server.cpp")
+        set(LSMKV_NEED_SERVER_LIB ON)
+    endif()
+endif()
+
+if(LSMKV_NEED_SERVER_LIB)
+    add_library(lsmkv_server_lib server/server.cpp)
+    target_include_directories(lsmkv_server_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/server)
+    target_link_libraries(lsmkv_server_lib PUBLIC lsmkv_lib)
+    target_compile_options(lsmkv_server_lib PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    )
+endif()
+
+if(LSMKV_BUILD_SERVER AND TARGET lsmkv_server_lib)
+    add_executable(lsmkv_server server/main.cpp)
+    target_link_libraries(lsmkv_server PRIVATE lsmkv_server_lib)
     target_compile_options(lsmkv_server PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     )
@@ -48,6 +65,9 @@ if(LSMKV_BUILD_TESTS)
     )
     add_executable(lsmkv_tests ${LSMKV_TEST_SOURCES})
     target_link_libraries(lsmkv_tests PRIVATE lsmkv_lib)
+    if(TARGET lsmkv_server_lib)
+        target_link_libraries(lsmkv_tests PRIVATE lsmkv_server_lib)
+    endif()
     target_include_directories(lsmkv_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_compile_options(lsmkv_tests PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
