@@ -80,10 +80,10 @@ Requirements: CMake ≥ 3.16, a C++17 compiler (GCC/Clang).
 
 ## TCP server
 
-A small line-oriented TCP front-end exposes `GET` / `SET` / `DEL` over the embedded engine (default port **7379**).
+A small line-oriented TCP front-end exposes `GET` / `SET` / `DEL` over the embedded engine (default port **7379**). Concurrent connections are capped (default **128**, override with `--max-clients`).
 
 ```bash
-./scripts/run_server.sh --db /tmp/lsmkv_data --port 7379
+./scripts/run_server.sh --db /tmp/lsmkv_data --port 7379 --max-clients 128
 # or: cmake --build build --target lsmkv_server && ./build/lsmkv_server --db /tmp/lsmkv_data
 ```
 

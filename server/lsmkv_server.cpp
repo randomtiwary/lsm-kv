@@ -15,8 +15,8 @@
 //   -ERR <message>
 //
 // Usage:
-//   lsmkv_server [--port PORT] [--host HOST] [--db PATH]
-// Defaults: host=0.0.0.0, port=7379, db=./lsmkv_data
+//   lsmkv_server [--port PORT] [--host HOST] [--db PATH] [--max-clients N]
+// Defaults: host=0.0.0.0, port=7379, db=./lsmkv_data, max-clients=128
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -26,9 +26,14 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 
 #include "lsmkv/db.h"
@@ -36,8 +41,36 @@
 namespace {
 
 std::atomic<bool> g_running{true};
+// Number of live client handler threads (includes the slot reserved at accept time).
+std::atomic<int> g_active_clients{0};
 
 void OnSignal(int /*sig*/) { g_running.store(false); }
+
+// Try to reserve a connection slot without exceeding max_clients. On success the
+// caller owns the reservation and must release it (via AdoptedClientSlot or decrement).
+bool TryReserveClientSlot(int max_clients) {
+    int cur = g_active_clients.load(std::memory_order_acquire);
+    while (cur < max_clients) {
+        if (g_active_clients.compare_exchange_weak(
+                cur, cur + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Release a slot reserved by TryReserveClientSlot when we will not hand it to a thread.
+void ReleaseClientSlot() {
+    g_active_clients.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+// Transfer a pre-reserved slot into RAII ownership (does not increment again).
+struct AdoptedClientSlot {
+    AdoptedClientSlot() = default;
+    ~AdoptedClientSlot() { g_active_clients.fetch_sub(1, std::memory_order_acq_rel); }
+    AdoptedClientSlot(const AdoptedClientSlot&) = delete;
+    AdoptedClientSlot& operator=(const AdoptedClientSlot&) = delete;
+};
 
 // --- tiny helpers -----------------------------------------------------------
 
@@ -174,8 +207,9 @@ bool HandleRequest(lsmkv::DB* db, int fd, const std::string& line) {
     return SendLine(fd, "-ERR unknown command '" + cmd + "'");
 }
 
+// client_fd ownership and a pre-reserved active-client slot are transferred in.
 void ServeClient(lsmkv::DB* db, int client_fd) {
-    // Disable SIGPIPE per-send via MSG_NOSIGNAL where available; also ignore globally.
+    AdoptedClientSlot slot;  // releases g_active_clients on exit
     std::string line;
     while (g_running.load()) {
         if (!RecvLine(client_fd, &line)) break;
@@ -188,14 +222,16 @@ struct Config {
     std::string host = "0.0.0.0";
     int port = 7379;
     std::string db_path = "./lsmkv_data";
+    int max_clients = 128;
 };
 
 void PrintUsage(const char* argv0) {
     std::cerr << "Usage: " << argv0
-              << " [--host HOST] [--port PORT] [--db PATH]\n"
-              << "  --host  bind address (default 0.0.0.0)\n"
-              << "  --port  TCP port (default 7379)\n"
-              << "  --db    database directory (default ./lsmkv_data)\n";
+              << " [--host HOST] [--port PORT] [--db PATH] [--max-clients N]\n"
+              << "  --host         bind address (default 0.0.0.0)\n"
+              << "  --port         TCP port (default 7379)\n"
+              << "  --db           database directory (default ./lsmkv_data)\n"
+              << "  --max-clients  max concurrent connections (default 128)\n";
 }
 
 bool ParseArgs(int argc, char** argv, Config* cfg) {
@@ -224,6 +260,14 @@ bool ParseArgs(int argc, char** argv, Config* cfg) {
             const char* v = need("--db");
             if (!v) return false;
             cfg->db_path = v;
+        } else if (arg == "--max-clients") {
+            const char* v = need("--max-clients");
+            if (!v) return false;
+            cfg->max_clients = std::atoi(v);
+            if (cfg->max_clients <= 0) {
+                std::cerr << "invalid --max-clients (must be >= 1)\n";
+                return false;
+            }
         } else if (arg == "-h" || arg == "--help") {
             PrintUsage(argv[0]);
             std::exit(0);
@@ -250,17 +294,17 @@ int main(int argc, char** argv) {
     lsmkv::Options options;
     options.create_if_missing = true;
 
-    lsmkv::DB* db = nullptr;
-    lsmkv::Status s = lsmkv::DB::Open(options, cfg.db_path, &db);
+    lsmkv::DB* raw_db = nullptr;
+    lsmkv::Status s = lsmkv::DB::Open(options, cfg.db_path, &raw_db);
     if (!s.ok()) {
         std::cerr << "DB::Open(" << cfg.db_path << ") failed: " << s.ToString() << "\n";
         return 1;
     }
+    std::unique_ptr<lsmkv::DB> db(raw_db);
 
     const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
         std::cerr << "socket() failed: " << std::strerror(errno) << "\n";
-        delete db;
         return 1;
     }
 
@@ -273,28 +317,27 @@ int main(int argc, char** argv) {
     if (::inet_pton(AF_INET, cfg.host.c_str(), &addr.sin_addr) != 1) {
         std::cerr << "invalid --host address: " << cfg.host << "\n";
         ::close(listen_fd);
-        delete db;
         return 1;
     }
 
     if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         std::cerr << "bind() failed: " << std::strerror(errno) << "\n";
         ::close(listen_fd);
-        delete db;
         return 1;
     }
 
     if (::listen(listen_fd, 128) < 0) {
         std::cerr << "listen() failed: " << std::strerror(errno) << "\n";
         ::close(listen_fd);
-        delete db;
         return 1;
     }
 
     std::cout << "lsmkv_server listening on " << cfg.host << ":" << cfg.port
-              << "  db=" << cfg.db_path << std::endl;
+              << "  db=" << cfg.db_path
+              << "  max_clients=" << cfg.max_clients << std::endl;
 
-    // Accept loop: one thread per client. DB handles concurrent Get/Put safely.
+    // Accept loop: one thread per client, capped by --max-clients.
+    // DB handles concurrent Get/Put safely.
     while (g_running.load()) {
         // Use a short accept timeout so we notice shutdown.
         fd_set rfds;
@@ -319,12 +362,31 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        if (!TryReserveClientSlot(cfg.max_clients)) {
+            // At capacity: reject cleanly so the client is not left hanging.
+            SendLine(client_fd, "-ERR too many connections");
+            ::close(client_fd);
+            continue;
+        }
+
         // Detach so we do not accumulate joinable threads for long-lived servers.
-        std::thread(ServeClient, db, client_fd).detach();
+        // Slot reservation is adopted by ServeClient and released when it exits.
+        try {
+            std::thread(ServeClient, db.get(), client_fd).detach();
+        } catch (const std::system_error& e) {
+            std::cerr << "failed to start client thread: " << e.what() << "\n";
+            ::close(client_fd);
+            ReleaseClientSlot();
+        }
     }
 
     ::close(listen_fd);
-    delete db;
+
+    // Wait for in-flight handlers so they do not use db after unique_ptr destroys it.
+    while (g_active_clients.load(std::memory_order_acquire) > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
     std::cout << "lsmkv_server shut down" << std::endl;
     return 0;
 }
