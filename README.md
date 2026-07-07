@@ -102,6 +102,23 @@ Protocol (one command per line; keys/values must not contain newlines):
 printf 'SET hello world\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7379
 ```
 
+### Docker
+
+Run two independent instances (separate data volumes, ports 7379 and 7380):
+
+```bash
+docker compose up --build
+printf 'SET hello from1\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7379
+printf 'SET hello from2\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7380
+```
+
+Single container:
+
+```bash
+docker build -t lsmkv-server .
+docker run --rm -p 7379:7379 -v lsmkv-data:/data lsmkv-server
+```
+
 ## Project layout
 
 ```
@@ -111,6 +128,8 @@ server/          TCP server (Server class + lsmkv_server main)
 tests/           Exhaustive unit + integration tests (incl. server)
 examples/        Minimal CLI example
 docs/DESIGN.md   Design notes and PR roadmap
+Dockerfile       Multi-stage image for the server
+docker-compose.yml  Two sample server instances
 ```
 
 ## Implementation roadmap
@@ -127,6 +146,7 @@ Work is split into small, independently reviewable PRs (see [docs/DESIGN.md](doc
 8. `DB` engine (Put/Get/Delete, flush, recovery)
 9. Compaction + multithreaded integration tests
 10. TCP server front-end
+11. Docker packaging for the server
 
 ## License
 

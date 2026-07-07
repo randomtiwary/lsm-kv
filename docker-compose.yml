@@ -1,0 +1,30 @@
+# Run multiple independent lsm-kv server instances (each with its own data volume).
+#
+#   docker compose up --build
+#   printf 'SET hello world\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7379
+#   printf 'SET hello world\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7380
+
+services:
+  lsmkv1:
+    build: .
+    image: lsmkv-server:local
+    container_name: lsmkv1
+    ports:
+      - "7379:7379"
+    volumes:
+      - lsmkv1-data:/data
+    restart: unless-stopped
+
+  lsmkv2:
+    build: .
+    image: lsmkv-server:local
+    container_name: lsmkv2
+    ports:
+      - "7380:7379"
+    volumes:
+      - lsmkv2-data:/data
+    restart: unless-stopped
+
+volumes:
+  lsmkv1-data:
+  lsmkv2-data:
