@@ -42,3 +42,65 @@ jobs:
           else
             echo "lsmkv_example not built in this revision; skipping"
           fi
+
+  # Build and smoke-test the server image so Dockerfile/compose regressions fail CI.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: lsmkv-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test single container
+        run: |
+          set -euo pipefail
+          docker run -d --name lsmkv-ci -p 7379:7379 lsmkv-server:ci
+          # Wait until the server is listening.
+          for i in $(seq 1 30); do
+            if printf 'PING\nQUIT\n' | nc -w 1 127.0.0.1 7379 2>/dev/null | grep -q '+PONG'; then
+              break
+            fi
+            sleep 0.2
+          done
+          printf 'PING\nSET hello world\nGET hello\nQUIT\n' | nc -w 2 127.0.0.1 7379 | tee /tmp/lsmkv-ci.out
+          grep -q '+PONG' /tmp/lsmkv-ci.out
+          grep -q '+OK' /tmp/lsmkv-ci.out
+          grep -q '^\$5$' /tmp/lsmkv-ci.out
+          grep -q '^world$' /tmp/lsmkv-ci.out
+          docker rm -f lsmkv-ci
+
+      - name: Validate and smoke-test docker compose
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml config >/dev/null
+          # Re-tag so compose's image: lsmkv-server:local matches what we built.
+          docker tag lsmkv-server:ci lsmkv-server:local
+          docker compose up -d --no-build
+          cleanup() { docker compose down -v || true; }
+          trap cleanup EXIT
+          for port in 7379 7380; do
+            ok=0
+            for i in $(seq 1 30); do
+              if printf 'PING\nQUIT\n' | nc -w 1 127.0.0.1 "$port" 2>/dev/null | grep -q '+PONG'; then
+                ok=1
+                break
+              fi
+              sleep 0.2
+            done
+            test "$ok" -eq 1
+            printf 'SET hello from%s\nGET hello\nQUIT\n' "$port" | nc -w 2 127.0.0.1 "$port" | tee "/tmp/lsmkv-$port.out"
+            grep -q '+OK' "/tmp/lsmkv-$port.out"
+            grep -q "from${port}" "/tmp/lsmkv-$port.out"
+          done
