@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(LSMKV_BUILD_TESTS "Build unit tests" ON)
 option(LSMKV_BUILD_EXAMPLES "Build examples" ON)
+option(LSMKV_BUILD_SERVER "Build TCP server binary" ON)
 
 # Pick up every translation unit under src/ automatically.
 file(GLOB LSMKV_LIB_SOURCES CONFIGURE_DEPENDS
@@ -29,6 +30,15 @@ target_compile_definitions(lsmkv_lib PUBLIC
 if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/lsmkv_example.cpp")
     add_executable(lsmkv_example examples/lsmkv_example.cpp)
     target_link_libraries(lsmkv_example PRIVATE lsmkv_lib)
+endif()
+
+if(LSMKV_BUILD_SERVER AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/server/lsmkv_server.cpp")
+    add_executable(lsmkv_server server/lsmkv_server.cpp)
+    target_link_libraries(lsmkv_server PRIVATE lsmkv_lib)
+    target_compile_options(lsmkv_server PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    )
+    install(TARGETS lsmkv_server RUNTIME DESTINATION bin)
 endif()
 
 if(LSMKV_BUILD_TESTS)

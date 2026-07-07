@@ -78,11 +78,36 @@ cmake --build build --target lsmkv_example
 
 Requirements: CMake ≥ 3.16, a C++17 compiler (GCC/Clang).
 
+## TCP server
+
+A small line-oriented TCP front-end exposes `GET` / `SET` / `DEL` over the embedded engine (default port **7379**).
+
+```bash
+./scripts/run_server.sh --db /tmp/lsmkv_data --port 7379
+# or: cmake --build build --target lsmkv_server && ./build/lsmkv_server --db /tmp/lsmkv_data
+```
+
+Protocol (one command per line; keys/values must not contain newlines):
+
+| Request | Response |
+|---------|----------|
+| `PING` | `+PONG` |
+| `SET <key> <value>` | `+OK` |
+| `GET <key>` | `$N` then a line with `N` bytes of value, or `$-1` if missing |
+| `DEL <key>` | `+OK` |
+| `QUIT` | `+OK` (then connection closes) |
+| errors | `-ERR <message>` |
+
+```bash
+printf 'SET hello world\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7379
+```
+
 ## Project layout
 
 ```
 include/lsmkv/   Public headers
 src/             Implementation
+server/          TCP server (lsmkv_server)
 tests/           Exhaustive unit + integration tests
 examples/        Minimal CLI example
 docs/DESIGN.md   Design notes and PR roadmap
@@ -101,6 +126,7 @@ Work is split into small, independently reviewable PRs (see [docs/DESIGN.md](doc
 7. Version set / manifest
 8. `DB` engine (Put/Get/Delete, flush, recovery)
 9. Compaction + multithreaded integration tests
+10. TCP server front-end
 
 ## License
 
