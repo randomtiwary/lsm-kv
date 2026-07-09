@@ -112,6 +112,16 @@ flowchart TD
 - **Dependencies:** PR 8
 - **Description:** L0→L1 compaction merging overlapping files; stress tests with concurrent readers/writers.
 
+### PR 10–11: TCP server + Docker
+Completed (see `server/`, `Dockerfile`).
+
+## Relational layer (MVCC + snapshot isolation)
+
+A simple relational database on top of `lsmkv::DB` lives under `include/reldb/` and
+`src/reldb/`. Full design, key layout, SI protocol, and PR breakdown:
+
+**→ [docs/RELATIONAL.md](RELATIONAL.md)** (PRs 12–17 on branch `feature/relational-db`)
+
 ## Open Questions
 
 None — defaults favor simplicity for an educational codebase.
