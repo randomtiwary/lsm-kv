@@ -24,7 +24,10 @@ public:
     // Lookup by name (cache then KV). NotFound if missing.
     lsmkv::Status GetTable(const std::string& name, TableSchema* out) const;
 
-    bool HasTable(const std::string& name) const;
+    // Sets *exists to whether the table is present. Returns OK on a definitive
+    // answer; propagates IO/corruption (and other) errors from the KV layer.
+    // Does not treat non-NotFound failures as "missing".
+    lsmkv::Status HasTable(const std::string& name, bool* exists) const;
 
     // Key encoding helper (also used by tests).
     static std::string TableKey(const std::string& table_name);

@@ -14,17 +14,12 @@ lsmkv::Status Catalog::CreateTable(const TableSchema& schema) {
     auto st = schema.Validate();
     if (!st.ok()) return st;
 
-    if (HasTable(schema.name())) {
+    bool exists = false;
+    st = HasTable(schema.name(), &exists);
+    if (!st.ok()) return st;
+    if (exists) {
         return lsmkv::Status::InvalidArgument("table already exists: " + schema.name());
     }
-
-    // Double-check KV in case cache is cold after reopen.
-    std::string existing;
-    st = db_->Get(lsmkv::ReadOptions(), TableKey(schema.name()), &existing);
-    if (st.ok()) {
-        return lsmkv::Status::InvalidArgument("table already exists: " + schema.name());
-    }
-    if (!st.IsNotFound()) return st;
 
     st = db_->Put(lsmkv::WriteOptions(), TableKey(schema.name()), schema.Encode());
     if (!st.ok()) return st;
@@ -58,9 +53,22 @@ lsmkv::Status Catalog::GetTable(const std::string& name, TableSchema* out) const
     return lsmkv::Status::OK();
 }
 
-bool Catalog::HasTable(const std::string& name) const {
+lsmkv::Status Catalog::HasTable(const std::string& name, bool* exists) const {
+    if (exists == nullptr) {
+        return lsmkv::Status::InvalidArgument("null exists");
+    }
     TableSchema unused;
-    return GetTable(name, &unused).ok();
+    auto st = GetTable(name, &unused);
+    if (st.ok()) {
+        *exists = true;
+        return lsmkv::Status::OK();
+    }
+    if (st.IsNotFound()) {
+        *exists = false;
+        return lsmkv::Status::OK();
+    }
+    // IO / corruption / etc. — not a definitive "missing".
+    return st;
 }
 
 }  // namespace reldb

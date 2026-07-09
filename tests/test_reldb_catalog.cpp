@@ -26,7 +26,12 @@ TEST(reldb_catalog_create_and_get) {
 
     reldb::Catalog cat(kv);
     expect(cat.CreateTable(UsersSchema()).ok(), "create");
-    expect(cat.HasTable("users"), "has");
+    bool exists = false;
+    expect(cat.HasTable("users", &exists).ok(), "has status");
+    expect(exists, "has");
+    exists = true;
+    expect(cat.HasTable("missing", &exists).ok(), "missing status");
+    expect(!exists, "missing");
 
     reldb::TableSchema got;
     expect(cat.GetTable("users", &got).ok(), "get");
@@ -60,6 +65,7 @@ TEST(reldb_catalog_reject_duplicate_and_invalid) {
 
 TEST(reldb_catalog_persists_across_reopen) {
     auto dir = MakeTempDir("reldb_cat3");
+    bool exists = false;
     lsmkv::Options opt;
     opt.create_if_missing = true;
     lsmkv::DB* kv = nullptr;
@@ -83,7 +89,9 @@ TEST(reldb_catalog_persists_across_reopen) {
     expect_eq(got.columns()[1].name, std::string("name"), "col");
     expect(cat2.GetTable("accounts", &got).ok(), "accounts after reopen");
     expect(got.columns()[0].type == reldb::ColumnType::kString, "uid type");
-    expect(cat2.HasTable("users"), "has after reopen");
+    exists = false;
+    expect(cat2.HasTable("users", &exists).ok(), "has status after reopen");
+    expect(exists, "has after reopen");
 
     // Key layout is stable for debugging / future tools.
     expect_eq(reldb::Catalog::TableKey("users"), std::string("c/t/users"), "key");
