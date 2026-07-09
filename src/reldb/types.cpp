@@ -19,7 +19,7 @@ std::string Value::ToString() const {
         case ColumnType::kString: return str_val_;
         case ColumnType::kBool: return bool_val_ ? "true" : "false";
     }
-    return "?";
+    return "<Invalid>";
 }
 
 }  // namespace reldb

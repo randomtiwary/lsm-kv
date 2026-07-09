@@ -1,15 +1,18 @@
 #include "reldb/schema.h"
 
+#include "lsmkv/debug.h"
+
 #include "lsmkv/encoding.h"
 #include "lsmkv/slice.h"
 
 namespace reldb {
 
 int TableSchema::primary_key_index() const {
+    // Callers should Validate() first (exactly one PK). Multiple PKs are a bug.
     int found = -1;
     for (std::size_t i = 0; i < columns_.size(); ++i) {
         if (columns_[i].primary_key) {
-            if (found >= 0) return -1;  // more than one
+            LSMKV_DCHECK(found < 0);
             found = static_cast<int>(i);
         }
     }
