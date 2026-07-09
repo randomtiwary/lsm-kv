@@ -10,9 +10,10 @@ option(LSMKV_BUILD_TESTS "Build unit tests" ON)
 option(LSMKV_BUILD_EXAMPLES "Build examples" ON)
 option(LSMKV_BUILD_SERVER "Build TCP server binary" ON)
 
-# Pick up every translation unit under src/ automatically.
+# Pick up every translation unit under src/ (and the reldb/ subdir) automatically.
 file(GLOB LSMKV_LIB_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/reldb/*.cpp"
 )
 add_library(lsmkv_lib ${LSMKV_LIB_SOURCES})
 target_include_directories(lsmkv_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
