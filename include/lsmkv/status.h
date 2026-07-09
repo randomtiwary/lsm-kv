@@ -14,6 +14,8 @@ public:
     static Status NotSupported(const std::string& msg) { return Status(kNotSupported, msg); }
     static Status InvalidArgument(const std::string& msg) { return Status(kInvalidArgument, msg); }
     static Status IOError(const std::string& msg) { return Status(kIOError, msg); }
+    // Write-write conflict under snapshot isolation (relational layer).
+    static Status Conflict(const std::string& msg) { return Status(kConflict, msg); }
 
     bool ok() const { return code_ == kOk; }
     bool IsNotFound() const { return code_ == kNotFound; }
@@ -21,6 +23,7 @@ public:
     bool IsNotSupported() const { return code_ == kNotSupported; }
     bool IsInvalidArgument() const { return code_ == kInvalidArgument; }
     bool IsIOError() const { return code_ == kIOError; }
+    bool IsConflict() const { return code_ == kConflict; }
 
     std::string ToString() const;
 
@@ -31,7 +34,8 @@ private:
         kCorruption = 2,
         kNotSupported = 3,
         kInvalidArgument = 4,
-        kIOError = 5
+        kIOError = 5,
+        kConflict = 6
     };
 
     Status(Code code, const std::string& msg) : code_(code), msg_(msg) {}
