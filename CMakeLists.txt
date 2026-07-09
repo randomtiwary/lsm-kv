@@ -33,6 +33,11 @@ if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/lsmkv_e
     target_link_libraries(lsmkv_example PRIVATE lsmkv_lib)
 endif()
 
+if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/reldb_example.cpp")
+    add_executable(reldb_example examples/reldb_example.cpp)
+    target_link_libraries(reldb_example PRIVATE lsmkv_lib)
+endif()
+
 # Server library is built when the binary and/or tests need it.
 set(LSMKV_NEED_SERVER_LIB OFF)
 if(LSMKV_BUILD_SERVER OR LSMKV_BUILD_TESTS)

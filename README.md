@@ -135,11 +135,31 @@ Dockerfile       Multi-stage image for the server
 docker-compose.yml  Two sample server instances
 ```
 
-## Relational layer (in progress)
+## Relational layer (MVCC + snapshot isolation)
 
-An educational **relational database** with **MVCC** storage and **snapshot isolation**
-is being added on branch `feature/relational-db` (see [docs/RELATIONAL.md](docs/RELATIONAL.md)).
-It sits on top of `lsmkv::DB` and does not change LSM internals.
+An educational **relational database** sits on top of `lsmkv::DB` (branch
+`feature/relational-db`, design in [docs/RELATIONAL.md](docs/RELATIONAL.md)):
+
+```cpp
+#include "reldb/database.h"
+#include "reldb/txn.h"
+
+reldb::Database* db = nullptr;
+reldb::Database::Open(options, "/tmp/reldb", &db);
+db->CreateTable(schema);
+
+reldb::Transaction* txn = nullptr;
+db->Begin(&txn);
+txn->Insert("users", row);
+txn->Get("users", pk, &row);
+txn->Commit();  // or Abort(); Status::Conflict on write-write conflicts
+delete txn;
+delete db;
+```
+
+Guarantees: **snapshot isolation** with first-committer-wins. Tests document that SI
+still allows **write skew** (not full serializability). Point lookups by primary key
+only in v1 (no SQL parser, no secondary indexes).
 
 ## Implementation roadmap
 
