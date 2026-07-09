@@ -6,7 +6,7 @@
 
 namespace reldb {
 
-// Logical column types supported in v1. Kept intentionally small for teaching.
+// Logical column types supported in v1.
 enum class ColumnType : std::uint8_t {
     kNull = 0,
     kInt64 = 1,
@@ -14,12 +14,17 @@ enum class ColumnType : std::uint8_t {
     kBool = 3,
 };
 
-// Tagged union for a single cell. Educational: no move-only fancy storage.
+// Tagged union for a single cell.
 class Value {
 public:
     Value() : type_(ColumnType::kNull), int_val_(0), bool_val_(false) {}
 
-    static Value Null() { return Value(); }
+    // Shared null instance — avoid allocating a fresh Value on every Null() call.
+    static const Value& Null() {
+        static const Value kNull;
+        return kNull;
+    }
+
     static Value Int64(std::int64_t v) {
         Value x;
         x.type_ = ColumnType::kInt64;
