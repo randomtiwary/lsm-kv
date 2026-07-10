@@ -44,7 +44,7 @@ public:
 
     // Insert a put (kTypeValue) or delete tombstone (kTypeDeletion). For deletions,
     // pass an empty value; only the encoded type tag is meaningful.
-    void Add(std::uint64_t seq, ValueType type, const Slice& key, const Slice& value);
+    void Add(Timestamp seq, ValueType type, const Slice& key, const Slice& value);
 
     // Lookup user_key visible at snapshot. `value` and `found` must be non-null
     // (enforced with LSMKV_DCHECK; enabled only for the CMake Debug config).
@@ -52,7 +52,7 @@ public:
     //   *found == false: miss in this table; *value is set to std::nullopt
     //   *found == true && *value == std::nullopt: definitive tombstone
     //   *found == true && *value has_value(): live value (possibly empty)
-    Status Get(const Slice& user_key, std::uint64_t snapshot, std::optional<std::string>* value,
+    Status Get(const Slice& user_key, Timestamp snapshot, std::optional<std::string>* value,
                bool* found) const;
 
     std::size_t ApproximateMemoryUsage() const;

@@ -6,7 +6,7 @@ namespace lsmkv {
 
 MemTable::MemTable() : table_(new Table(MemTableEntryComparator())) {}
 
-void MemTable::Add(std::uint64_t seq, ValueType type, const Slice& key, const Slice& value) {
+void MemTable::Add(Timestamp seq, ValueType type, const Slice& key, const Slice& value) {
     std::string ikey = MakeInternalKey(key, seq, type);
     std::string entry;
     PutLengthPrefixedSlice(&entry, ikey);
@@ -15,7 +15,7 @@ void MemTable::Add(std::uint64_t seq, ValueType type, const Slice& key, const Sl
     table_->Insert(entry);
 }
 
-Status MemTable::Get(const Slice& user_key, std::uint64_t snapshot,
+Status MemTable::Get(const Slice& user_key, Timestamp snapshot,
                      std::optional<std::string>* value, bool* found) const {
     LSMKV_DCHECK(value != nullptr);
     LSMKV_DCHECK(found != nullptr);

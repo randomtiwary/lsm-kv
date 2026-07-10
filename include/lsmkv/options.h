@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "lsmkv/common.h"
+
 namespace lsmkv {
 
 struct Options {
@@ -27,7 +29,7 @@ struct Options {
 
 struct ReadOptions {
     // Reserved for future snapshot support.
-    std::uint64_t snapshot = 0;
+    Timestamp snapshot = 0;
 };
 
 struct WriteOptions {

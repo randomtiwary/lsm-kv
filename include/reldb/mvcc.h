@@ -6,11 +6,13 @@
 
 #include "lsmkv/db.h"
 #include "lsmkv/status.h"
-#include "reldb/common.h"
+#include "lsmkv/common.h"
 #include "reldb/row.h"
 #include "reldb/types.h"
 
 namespace reldb {
+
+using Timestamp = lsmkv::Timestamp;
 
 // One physical version of a row in the MVCC chain.
 //
