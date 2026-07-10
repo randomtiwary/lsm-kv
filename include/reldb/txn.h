@@ -1,11 +1,13 @@
 #pragma once
 
 #include <cstdint>
-#include <map>
+#include <vector>
 #include <string>
+#include <utility>
 
-#include "lsmkv/status.h"
 #include "lsmkv/common.h"
+#include "lsmkv/status.h"
+#include "reldb/mvcc.h"
 #include "reldb/row.h"
 #include "reldb/types.h"
 
@@ -15,7 +17,14 @@ using Timestamp = lsmkv::Timestamp;
 
 class Database;
 
-// Snapshot-isolated transaction. Reads use start_ts; writes buffer until Commit.
+// Snapshot-isolated transaction with eager durable writes.
+//
+// Writes install provisional VersionRecords immediately (cost on the write
+// path). Commit stamps commit_ts / closes prior versions and marks the txn
+// committed. Abort marks the txn aborted and restores row heads when needed.
+//
+// Early write-write conflict: if another open txn already has a provisional
+// version at the head of a PK chain, this txn gets Status::Conflict on write.
 class Transaction {
 public:
     ~Transaction();
@@ -24,6 +33,7 @@ public:
     Transaction& operator=(const Transaction&) = delete;
 
     Timestamp start_ts() const { return start_ts_; }
+    TxnId txn_id() const { return txn_id_; }
     bool finished() const { return finished_; }
 
     lsmkv::Status Insert(const std::string& table, const Row& row);
@@ -37,24 +47,24 @@ public:
 private:
     friend class Database;
 
-    enum class WriteOp : std::uint8_t { kInsert, kUpdate, kDelete };
-
-    struct WriteEntry {
-        WriteOp op;
+    struct WrittenKey {
         std::string table;
         Value pk;
-        Row row;  // valid for Insert/Update
+        Timestamp version_id;  // provisional version installed by this txn
     };
 
-    Transaction(Database* db, Timestamp start_ts);
+    Transaction(Database* db, TxnId txn_id, Timestamp start_ts);
 
-    static std::string WriteKey(const std::string& table, const Value& pk);
+    // Shared write path for insert/update/delete.
+    lsmkv::Status Write(const std::string& table, const Value& pk, bool is_delete,
+                        const Row* row, bool is_insert);
 
     Database* db_;
+    TxnId txn_id_;
     Timestamp start_ts_;
     bool finished_ = false;
-    // Ordered map for deterministic commit apply.
-    std::map<std::string, WriteEntry> write_set_;
+    // Keys this txn wrote (for commit stamping / abort head restore).
+    std::vector<WrittenKey> written_;
 };
 
 }  // namespace reldb

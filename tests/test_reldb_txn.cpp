@@ -178,11 +178,11 @@ TEST(reldb_txn_write_write_conflict) {
     expect(db->Begin(&t1).ok(), "t1");
     expect(db->Begin(&t2).ok(), "t2");
     expect(t1->Update("users", User(1, "from1")).ok(), "u1");
-    expect(t2->Update("users", User(1, "from2")).ok(), "u2");
+    // Early WW: second open writer on the same PK fails on write, not commit.
+    expect(t2->Update("users", User(1, "from2")).IsConflict(), "u2");
 
     expect(t1->Commit().ok(), "t1 wins");
-    auto st = t2->Commit();
-    expect(st.IsConflict(), "t2 conflict");
+    expect(t2->Abort().ok(), "t2 abort");
     delete t1;
     delete t2;
 
@@ -266,6 +266,62 @@ TEST(reldb_txn_insert_then_delete_same_txn) {
     expect(db->Begin(&txn).ok(), "b2");
     expect(txn->Get("users", reldb::Value::Int64(1), &got).IsNotFound(), "still gone");
     delete txn;
+    delete db;
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_txn_early_write_write_conflict) {
+    auto dir = MakeTempDir("reldb_txn_eww");
+    reldb::Database* db = OpenDb(dir);
+    expect(db != nullptr, "open");
+    expect(db->CreateTable(UsersSchema()).ok(), "create");
+
+    reldb::Transaction* t1 = nullptr;
+    reldb::Transaction* t2 = nullptr;
+    expect(db->Begin(&t1).ok(), "t1");
+    expect(db->Begin(&t2).ok(), "t2");
+    expect(t1->Insert("users", User(1, "a")).ok(), "t1 ins");
+    // t2 tries same PK while t1 still open => early WW conflict
+    expect(t2->Insert("users", User(1, "b")).IsConflict(), "t2 conflict");
+    expect(t1->Commit().ok(), "t1 commit");
+    delete t1;
+    delete t2;
+
+    // After t1 commits, a new txn can proceed
+    expect(db->Begin(&t2).ok(), "t2b");
+    expect(t2->Update("users", User(1, "c")).ok(), "t2 upd");
+    expect(t2->Commit().ok(), "t2 commit");
+    delete t2;
+    delete db;
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_txn_eager_write_visible_only_after_commit) {
+    auto dir = MakeTempDir("reldb_txn_eager");
+    reldb::Database* db = OpenDb(dir);
+    expect(db != nullptr, "open");
+    expect(db->CreateTable(UsersSchema()).ok(), "create");
+
+    reldb::Transaction* t1 = nullptr;
+    reldb::Transaction* t2 = nullptr;
+    expect(db->Begin(&t1).ok(), "t1");
+    expect(t1->Insert("users", User(1, "secret")).ok(), "ins");
+
+    expect(db->Begin(&t2).ok(), "t2");
+    reldb::Row got;
+    // t2 must not see t1's provisional write
+    expect(t2->Get("users", reldb::Value::Int64(1), &got).IsNotFound(), "t2 no dirty read");
+    expect(t1->Commit().ok(), "t1 commit");
+    delete t1;
+
+    // t2 still on old snapshot
+    expect(t2->Get("users", reldb::Value::Int64(1), &got).IsNotFound(), "t2 snap");
+    delete t2;
+
+    expect(db->Begin(&t2).ok(), "t3");
+    expect(t2->Get("users", reldb::Value::Int64(1), &got).ok(), "see committed");
+    expect(got.at(1) == reldb::Value::String("secret"), "val");
+    delete t2;
     delete db;
     RemoveDirRecursive(dir);
 }

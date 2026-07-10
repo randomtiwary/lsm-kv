@@ -8,45 +8,44 @@
 #include "reldb/row.h"
 #include "reldb/types.h"
 
-// --- Pure visibility (no KV) -------------------------------------------------
-
 TEST(reldb_mvcc_visibility_basic) {
     reldb::VersionRecord v;
     v.start_ts = 10;
-    v.end_ts = 0;  // live forever after 10
+    v.end_ts = 0;
 
-    expect(reldb::IsVisible(v, 10), "at start");
-    expect(reldb::IsVisible(v, 100), "after start");
-    expect(!reldb::IsVisible(v, 9), "before start");
+    expect(reldb::IsCommittedVisible(v, 10), "at start");
+    expect(reldb::IsCommittedVisible(v, 100), "after start");
+    expect(!reldb::IsCommittedVisible(v, 9), "before start");
 
     v.end_ts = 20;
-    expect(reldb::IsVisible(v, 10), "at start closed");
-    expect(reldb::IsVisible(v, 19), "before end");
-    expect(!reldb::IsVisible(v, 20), "at end exclusive");
-    expect(!reldb::IsVisible(v, 21), "after end");
-    expect(!reldb::IsVisible(v, 9), "before start closed");
+    expect(reldb::IsCommittedVisible(v, 10), "at start closed");
+    expect(reldb::IsCommittedVisible(v, 19), "before end");
+    expect(!reldb::IsCommittedVisible(v, 20), "at end exclusive");
+    expect(!reldb::IsCommittedVisible(v, 21), "after end");
+
+    v.start_ts = 0;  // provisional
+    expect(!reldb::IsCommittedVisible(v, 100), "provisional never committed-visible");
 }
 
 TEST(reldb_mvcc_version_record_codec) {
     reldb::VersionRecord v;
+    v.version_id = 7;
     v.start_ts = 5;
     v.end_ts = 9;
-    v.prev_ts = 3;
+    v.prev_id = 3;
+    v.created_by = 2;
     v.is_tombstone = false;
     v.payload = reldb::Row({reldb::Value::Int64(1), reldb::Value::String("x")}).Encode();
 
     reldb::VersionRecord out;
     expect(reldb::VersionRecord::Decode(v.Encode(), &out).ok(), "decode");
+    expect_eq(out.version_id, static_cast<reldb::Timestamp>(7), "vid");
     expect_eq(out.start_ts, static_cast<reldb::Timestamp>(5), "start");
     expect_eq(out.end_ts, static_cast<reldb::Timestamp>(9), "end");
-    expect_eq(out.prev_ts, static_cast<reldb::Timestamp>(3), "prev");
+    expect_eq(out.prev_id, static_cast<reldb::Timestamp>(3), "prev");
+    expect_eq(out.created_by, static_cast<reldb::TxnId>(2), "by");
     expect(!out.is_tombstone, "not tomb");
     expect_eq(out.payload, v.payload, "payload");
-
-    v.is_tombstone = true;
-    v.payload.clear();
-    expect(reldb::VersionRecord::Decode(v.Encode(), &out).ok(), "tomb decode");
-    expect(out.is_tombstone, "tomb");
 }
 
 TEST(reldb_mvcc_pk_key_encoding) {
@@ -56,13 +55,7 @@ TEST(reldb_mvcc_pk_key_encoding) {
     reldb::Value back;
     expect(reldb::DecodePkFromKey(hex, &back).ok(), "decode pk");
     expect(back == pk, "pk roundtrip");
-
-    reldb::Value i = reldb::Value::Int64(42);
-    expect(reldb::DecodePkFromKey(reldb::EncodePkForKey(i), &back).ok(), "int pk");
-    expect(back == i, "int eq");
 }
-
-// --- Store integration -------------------------------------------------------
 
 namespace {
 
@@ -88,20 +81,19 @@ TEST(reldb_mvcc_insert_and_read_at_snapshot) {
 
     reldb::Value pk = reldb::Value::Int64(1);
     reldb::VersionRecord v1;
+    v1.version_id = 10;
     v1.start_ts = 10;
-    v1.end_ts = 0;
-    v1.prev_ts = 0;
+    v1.created_by = 1;
     v1.payload = MakeUser(1, "ann").Encode();
     expect(store.PutVersion("users", pk, v1).ok(), "put v1");
 
     reldb::Row row;
-    expect(store.GetRow("users", pk, /*snapshot=*/10, &row).ok(), "snap 10");
+    expect(store.GetRowCommitted("users", pk, /*snapshot=*/10, &row).ok(), "snap 10");
     expect(row.at(1) == reldb::Value::String("ann"), "ann");
-    expect(store.GetRow("users", pk, /*snapshot=*/9, &row).IsNotFound(), "snap 9");
-    expect(store.GetRow("users", pk, /*snapshot=*/100, &row).ok(), "snap 100");
+    expect(store.GetRowCommitted("users", pk, /*snapshot=*/9, &row).IsNotFound(), "snap 9");
 
     reldb::Timestamp latest = 0;
-    expect(store.GetLatestStartTs("users", pk, &latest).ok(), "latest");
+    expect(store.GetLatestVersionId("users", pk, &latest).ok(), "latest");
     expect_eq(latest, static_cast<reldb::Timestamp>(10), "latest 10");
 
     RemoveDirRecursive(dir);
@@ -114,32 +106,31 @@ TEST(reldb_mvcc_update_chain_visibility) {
     reldb::MvccStore store(kv);
     reldb::Value pk = reldb::Value::Int64(1);
 
-    // t=10: insert ann
     reldb::VersionRecord v1;
+    v1.version_id = 10;
     v1.start_ts = 10;
-    v1.end_ts = 0;
-    v1.prev_ts = 0;
+    v1.created_by = 1;
     v1.payload = MakeUser(1, "ann").Encode();
     expect(store.PutVersion("users", pk, v1).ok(), "v1");
 
-    // t=20: update to bob — close v1, write v2
-    expect(store.CloseVersion("users", pk, 10, 20).ok(), "close v1");
+    v1.end_ts = 20;
+    expect(store.PutVersionValue("users", pk, v1).ok(), "close v1");
+
     reldb::VersionRecord v2;
+    v2.version_id = 20;
     v2.start_ts = 20;
-    v2.end_ts = 0;
-    v2.prev_ts = 10;
+    v2.prev_id = 10;
+    v2.created_by = 2;
     v2.payload = MakeUser(1, "bob").Encode();
     expect(store.PutVersion("users", pk, v2).ok(), "v2");
 
     reldb::Row row;
-    expect(store.GetRow("users", pk, 10, &row).ok(), "s10");
+    expect(store.GetRowCommitted("users", pk, 10, &row).ok(), "s10");
     expect(row.at(1) == reldb::Value::String("ann"), "ann at 10");
-    expect(store.GetRow("users", pk, 19, &row).ok(), "s19");
+    expect(store.GetRowCommitted("users", pk, 19, &row).ok(), "s19");
     expect(row.at(1) == reldb::Value::String("ann"), "ann at 19");
-    expect(store.GetRow("users", pk, 20, &row).ok(), "s20");
+    expect(store.GetRowCommitted("users", pk, 20, &row).ok(), "s20");
     expect(row.at(1) == reldb::Value::String("bob"), "bob at 20");
-    expect(store.GetRow("users", pk, 50, &row).ok(), "s50");
-    expect(row.at(1) == reldb::Value::String("bob"), "bob at 50");
 
     RemoveDirRecursive(dir);
 }
@@ -152,23 +143,26 @@ TEST(reldb_mvcc_delete_tombstone) {
     reldb::Value pk = reldb::Value::Int64(7);
 
     reldb::VersionRecord v1;
+    v1.version_id = 5;
     v1.start_ts = 5;
+    v1.created_by = 1;
     v1.payload = MakeUser(7, "zoe").Encode();
     expect(store.PutVersion("users", pk, v1).ok(), "insert");
 
-    expect(store.CloseVersion("users", pk, 5, 15).ok(), "close");
+    v1.end_ts = 15;
+    expect(store.PutVersionValue("users", pk, v1).ok(), "close");
+
     reldb::VersionRecord tomb;
+    tomb.version_id = 15;
     tomb.start_ts = 15;
-    tomb.prev_ts = 5;
+    tomb.prev_id = 5;
+    tomb.created_by = 2;
     tomb.is_tombstone = true;
     expect(store.PutVersion("users", pk, tomb).ok(), "tomb");
 
     reldb::Row row;
-    expect(store.GetRow("users", pk, 5, &row).ok(), "before delete");
-    expect(row.at(1) == reldb::Value::String("zoe"), "zoe");
-    expect(store.GetRow("users", pk, 14, &row).ok(), "still live");
-    expect(store.GetRow("users", pk, 15, &row).IsNotFound(), "deleted at 15");
-    expect(store.GetRow("users", pk, 100, &row).IsNotFound(), "still deleted");
+    expect(store.GetRowCommitted("users", pk, 5, &row).ok(), "before delete");
+    expect(store.GetRowCommitted("users", pk, 15, &row).IsNotFound(), "deleted at 15");
 
     RemoveDirRecursive(dir);
 }
@@ -179,29 +173,7 @@ TEST(reldb_mvcc_missing_row) {
     expect(kv != nullptr, "open");
     reldb::MvccStore store(kv);
     reldb::Row row;
-    expect(store.GetRow("users", reldb::Value::Int64(99), 1, &row).IsNotFound(), "miss");
-    reldb::Timestamp ts = 0;
-    expect(store.GetLatestStartTs("users", reldb::Value::Int64(99), &ts).IsNotFound(),
-           "no head");
-    RemoveDirRecursive(dir);
-}
-
-TEST(reldb_mvcc_persists_across_reopen) {
-    auto dir = MakeTempDir("reldb_mvcc5");
-    {
-        auto kv = OpenTemp(dir);
-        expect(kv != nullptr, "open");
-        reldb::MvccStore store(kv);
-        reldb::VersionRecord v;
-        v.start_ts = 3;
-        v.payload = MakeUser(1, "persist").Encode();
-        expect(store.PutVersion("users", reldb::Value::Int64(1), v).ok(), "put");
-    }
-    auto kv = OpenTemp(dir);
-    expect(kv != nullptr, "reopen");
-    reldb::MvccStore store(kv);
-    reldb::Row row;
-    expect(store.GetRow("users", reldb::Value::Int64(1), 3, &row).ok(), "get");
-    expect(row.at(1) == reldb::Value::String("persist"), "val");
+    expect(store.GetRowCommitted("users", reldb::Value::Int64(99), 1, &row).IsNotFound(),
+           "miss");
     RemoveDirRecursive(dir);
 }

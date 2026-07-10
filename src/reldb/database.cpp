@@ -1,12 +1,31 @@
 #include "reldb/database.h"
 
 #include "lsmkv/encoding.h"
+#include "reldb/macros.h"
 #include "reldb/txn.h"
 
 namespace reldb {
 namespace {
 
 const char kNextTsKey[] = "m/next_ts";
+const char kNextTxnKey[] = "m/next_txn";
+const char kNextVidKey[] = "m/next_vid";
+
+std::string EncodeTxnMeta(const TxnMeta& meta) {
+    std::string out;
+    out.push_back(static_cast<char>(meta.state));
+    lsmkv::PutFixed64(&out, meta.commit_ts);
+    return out;
+}
+
+lsmkv::Status DecodeTxnMeta(const std::string& bytes, TxnMeta* out) {
+    if (bytes.size() != 1 + 8) {
+        return STATUS(Corruption, "txn meta: bad length");
+    }
+    out->state = static_cast<TxnState>(static_cast<std::uint8_t>(bytes[0]));
+    out->commit_ts = lsmkv::DecodeFixed64(bytes.data() + 1);
+    return STATUS(OK);
+}
 
 }  // namespace
 
@@ -20,154 +39,167 @@ Database::~Database() = default;
 lsmkv::Status Database::Open(const lsmkv::Options& options, const std::string& path,
                              Database** dbptr) {
     if (dbptr == nullptr) {
-        return lsmkv::Status::InvalidArgument("null dbptr");
+        return STATUS(InvalidArgument, "null dbptr");
     }
     lsmkv::DB* raw = nullptr;
     auto st = lsmkv::DB::Open(options, path, &raw);
     if (!st.ok()) return st;
 
     auto* db = new Database(std::shared_ptr<lsmkv::DB>(raw));
-    st = db->InitOracle();
+    st = db->InitOracles();
     if (!st.ok()) {
         delete db;
         return st;
     }
     *dbptr = db;
-    return lsmkv::Status::OK();
+    return STATUS(OK);
 }
 
-lsmkv::Status Database::InitOracle() {
-    std::string bytes;
-    auto st = kv_->Get(lsmkv::ReadOptions(), kNextTsKey, &bytes);
-    if (st.IsNotFound()) {
-        next_ts_ = 1;
-        return PersistOracle();
-    }
-    if (!st.ok()) return st;
-    if (bytes.size() != 8) {
-        return lsmkv::Status::Corruption("next_ts: bad length");
-    }
-    next_ts_ = lsmkv::DecodeFixed64(bytes.data());
-    if (next_ts_ == 0) {
-        next_ts_ = 1;
-    }
-    return lsmkv::Status::OK();
+lsmkv::Status Database::InitOracles() {
+    auto load = [&](const char* key, Timestamp* dst, Timestamp default_v) -> lsmkv::Status {
+        std::string bytes;
+        auto st = kv_->Get(lsmkv::ReadOptions(), key, &bytes);
+        if (st.IsNotFound()) {
+            *dst = default_v;
+            return STATUS(OK);
+        }
+        RELDB_RETURN_NOT_OK(st);
+        if (bytes.size() != 8) {
+            return STATUS(Corruption, std::string(key) + ": bad length");
+        }
+        *dst = lsmkv::DecodeFixed64(bytes.data());
+        if (*dst == 0) *dst = default_v;
+        return STATUS(OK);
+    };
+    RELDB_RETURN_NOT_OK(load(kNextTsKey, &next_ts_, 1));
+    RELDB_RETURN_NOT_OK(load(kNextTxnKey, &next_txn_id_, 1));
+    RELDB_RETURN_NOT_OK(load(kNextVidKey, &next_version_id_, 1));
+    return PersistOracles();
 }
 
-lsmkv::Status Database::PersistOracle() {
-    std::string bytes;
-    lsmkv::PutFixed64(&bytes, next_ts_);
-    return kv_->Put(lsmkv::WriteOptions(), kNextTsKey, bytes);
+lsmkv::Status Database::PersistOracles() {
+    auto put = [&](const char* key, Timestamp v) {
+        std::string bytes;
+        lsmkv::PutFixed64(&bytes, v);
+        return kv_->Put(lsmkv::WriteOptions(), key, bytes);
+    };
+    RELDB_RETURN_NOT_OK(put(kNextTsKey, next_ts_));
+    RELDB_RETURN_NOT_OK(put(kNextTxnKey, next_txn_id_));
+    RELDB_RETURN_NOT_OK(put(kNextVidKey, next_version_id_));
+    return STATUS(OK);
 }
 
 lsmkv::Status Database::CreateTable(const TableSchema& schema) {
     return catalog_->CreateTable(schema);
 }
 
+lsmkv::Status Database::GetTxnMeta(TxnId id, TxnMeta* out) const {
+    if (out == nullptr) {
+        return STATUS(InvalidArgument, "null out");
+    }
+    std::string bytes;
+    auto st = kv_->Get(lsmkv::ReadOptions(), TxnKey(id), &bytes);
+    if (st.IsNotFound()) {
+        return STATUS(NotFound, "txn not found");
+    }
+    RELDB_RETURN_NOT_OK(st);
+    return DecodeTxnMeta(bytes, out);
+}
+
+lsmkv::Status Database::PutTxnMeta(TxnId id, const TxnMeta& meta) {
+    return kv_->Put(lsmkv::WriteOptions(), TxnKey(id), EncodeTxnMeta(meta));
+}
+
 lsmkv::Status Database::Begin(Transaction** txn) {
     if (txn == nullptr) {
-        return lsmkv::Status::InvalidArgument("null txn");
+        return STATUS(InvalidArgument, "null txn");
     }
-    Timestamp start_ts = 0;
-    {
-        std::lock_guard<std::mutex> lock(commit_mu_);
-        start_ts = next_ts_ - 1;
-    }
-    *txn = new Transaction(this, start_ts);
-    return lsmkv::Status::OK();
+    std::lock_guard<std::mutex> lock(mu_);
+    const TxnId id = next_txn_id_++;
+    const Timestamp start_ts = next_ts_ - 1;
+    RELDB_RETURN_NOT_OK(PersistOracles());
+
+    TxnMeta meta;
+    meta.state = TxnState::kOpen;
+    meta.commit_ts = 0;
+    RELDB_RETURN_NOT_OK(PutTxnMeta(id, meta));
+
+    *txn = new Transaction(this, id, start_ts);
+    return STATUS(OK);
 }
 
 lsmkv::Status Database::CommitTransaction(Transaction* txn) {
-    std::lock_guard<std::mutex> lock(commit_mu_);
+    std::lock_guard<std::mutex> lock(mu_);
     if (txn->finished_) {
-        return lsmkv::Status::InvalidArgument("transaction already finished");
-    }
-    if (txn->write_set_.empty()) {
-        txn->finished_ = true;
-        return lsmkv::Status::OK();
+        return STATUS(InvalidArgument, "transaction already finished");
     }
 
-    const Timestamp commit_ts = next_ts_;
+    const Timestamp commit_ts = next_ts_++;
 
-    // Phase 1: conflict checks and semantic checks (no writes yet).
-    for (const auto& kv : txn->write_set_) {
-        const auto& e = kv.second;
-        Timestamp latest = 0;
-        auto st = store_->GetLatestStartTs(e.table, e.pk, &latest);
-        if (!st.ok() && !st.IsNotFound()) return st;
-
-        if (st.ok() && latest > txn->start_ts_) {
-            txn->finished_ = true;
-            return lsmkv::Status::Conflict("write-write conflict on " + e.table);
-        }
-
-        if (e.op == Transaction::WriteOp::kInsert) {
-            if (st.ok()) {
-                VersionRecord cur;
-                auto gst = store_->GetVersion(e.table, e.pk, latest, &cur);
-                if (!gst.ok()) return gst;
-                // Live row exists if the latest version is still open and not a tombstone.
-                if (!cur.is_tombstone && cur.end_ts == 0) {
-                    txn->finished_ = true;
-                    return lsmkv::Status::InvalidArgument("duplicate primary key");
-                }
-            }
-        } else {
-            // Update / Delete require a currently live row.
-            if (st.IsNotFound()) {
-                txn->finished_ = true;
-                return lsmkv::Status::NotFound("row not found for update/delete");
-            }
-            VersionRecord cur;
-            auto gst = store_->GetVersion(e.table, e.pk, latest, &cur);
-            if (!gst.ok()) return gst;
-            if (cur.is_tombstone || cur.end_ts != 0) {
-                txn->finished_ = true;
-                return lsmkv::Status::NotFound("row not found for update/delete");
-            }
-        }
-    }
-
-    // Phase 2: apply versions at commit_ts.
-    for (const auto& kv : txn->write_set_) {
-        const auto& e = kv.second;
-        Timestamp prev_ts = 0;
-        Timestamp latest = 0;
-        auto st = store_->GetLatestStartTs(e.table, e.pk, &latest);
-        if (st.ok()) {
-            prev_ts = latest;
-            // Supersede the current live version.
-            st = store_->CloseVersion(e.table, e.pk, latest, commit_ts);
-            if (!st.ok()) return st;
-        } else if (!st.IsNotFound()) {
-            return st;
-        }
-
+    // Stamp provisional versions and close the prior committed version they
+    // superseded. Early WW already prevented concurrent open writers on a key.
+    for (const auto& w : txn->written_) {
         VersionRecord rec;
-        rec.start_ts = commit_ts;
-        rec.end_ts = 0;
-        rec.prev_ts = prev_ts;
-        if (e.op == Transaction::WriteOp::kDelete) {
-            rec.is_tombstone = true;
-        } else {
-            rec.is_tombstone = false;
-            rec.payload = e.row.Encode();
+        RELDB_RETURN_NOT_OK(store_->GetVersion(w.table, w.pk, w.version_id, &rec));
+        if (rec.created_by != txn->txn_id_ || !rec.is_provisional()) {
+            return STATUS(Corruption, "commit: unexpected version state");
         }
-        st = store_->PutVersion(e.table, e.pk, rec);
-        if (!st.ok()) return st;
+        rec.start_ts = commit_ts;
+        RELDB_RETURN_NOT_OK(store_->PutVersionValue(w.table, w.pk, rec));
+
+        if (rec.prev_id != 0) {
+            VersionRecord prev;
+            auto st = store_->GetVersion(w.table, w.pk, rec.prev_id, &prev);
+            if (st.ok() && !prev.is_provisional() && prev.end_ts == 0) {
+                prev.end_ts = commit_ts;
+                RELDB_RETURN_NOT_OK(store_->PutVersionValue(w.table, w.pk, prev));
+            } else if (!st.ok() && !st.IsNotFound()) {
+                return st;
+            }
+        }
     }
 
-    next_ts_ = commit_ts + 1;
-    auto st = PersistOracle();
-    if (!st.ok()) return st;
+    TxnMeta meta;
+    meta.state = TxnState::kCommitted;
+    meta.commit_ts = commit_ts;
+    RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, meta));
+    RELDB_RETURN_NOT_OK(PersistOracles());
 
     txn->finished_ = true;
-    return lsmkv::Status::OK();
+    return STATUS(OK);
 }
 
-void Database::FinishTransaction(Transaction* txn) {
-    std::lock_guard<std::mutex> lock(commit_mu_);
+lsmkv::Status Database::AbortTransaction(Transaction* txn) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (txn->finished_) {
+        return STATUS(OK);
+    }
+
+    // Restore heads for keys whose latest version is our provisional write.
+    for (auto it = txn->written_.rbegin(); it != txn->written_.rend(); ++it) {
+        const auto& w = *it;
+        Timestamp head = 0;
+        auto st = store_->GetLatestVersionId(w.table, w.pk, &head);
+        if (st.IsNotFound()) continue;
+        RELDB_RETURN_NOT_OK(st);
+        if (head != w.version_id) continue;
+
+        VersionRecord rec;
+        RELDB_RETURN_NOT_OK(store_->GetVersion(w.table, w.pk, w.version_id, &rec));
+        if (rec.prev_id == 0) {
+            RELDB_RETURN_NOT_OK(store_->ClearHead(w.table, w.pk));
+        } else {
+            RELDB_RETURN_NOT_OK(store_->SetHead(w.table, w.pk, rec.prev_id));
+        }
+    }
+
+    TxnMeta meta;
+    meta.state = TxnState::kAborted;
+    meta.commit_ts = 0;
+    RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, meta));
+
     txn->finished_ = true;
+    return STATUS(OK);
 }
 
 }  // namespace reldb
