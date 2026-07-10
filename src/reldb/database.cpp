@@ -146,6 +146,9 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
         Timestamp head = 0;
         RELDB_RETURN_NOT_OK(store_->GetLatestVersionId(w.table, w.pk, &head));
         if (head != w.version_id) {
+            // Our provisional is no longer the head (another writer won the race
+            // or we lost the key). Cannot commit: restore our provisional heads
+            // and mark this txn Aborted so readers ignore our versions.
             RELDB_RETURN_NOT_OK(RestoreWrittenHeads(txn));
             TxnMeta aborted;
             aborted.state = TxnState::kAborted;
@@ -160,6 +163,10 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
             VersionRecord prev;
             auto st = store_->GetVersion(w.table, w.pk, rec.prev_id, &prev);
             if (st.ok() && !prev.is_provisional() && prev.start_ts > txn->start_ts_) {
+                // A version committed after our snapshot sits under our
+                // provisional. SI first-committer-wins: abort rather than
+                // overwrite that newer committed write. Restore heads and
+                // mark Aborted so our provisionals are no longer visible.
                 RELDB_RETURN_NOT_OK(RestoreWrittenHeads(txn));
                 TxnMeta aborted;
                 aborted.state = TxnState::kAborted;
