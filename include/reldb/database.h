@@ -31,12 +31,15 @@ public:
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
 
+    // DDL is NOT transactional in v1: it commits immediately outside any
+    // user Transaction (no snapshot, no rollback with Abort). See docs/RELATIONAL.md.
     lsmkv::Status CreateTable(const TableSchema& schema);
+
     lsmkv::Status Begin(Transaction** txn);
 
-    Catalog* catalog() { return catalog_.get(); }
-    MvccStore* store() { return store_.get(); }
-    lsmkv::DB* kv() { return kv_.get(); }
+    std::shared_ptr<Catalog> catalog() const { return catalog_; }
+    std::shared_ptr<MvccStore> store() const { return store_; }
+    std::shared_ptr<lsmkv::DB> kv() const { return kv_; }
 
     lsmkv::Status GetTxnMeta(TxnId id, TxnMeta* out) const;
     lsmkv::Status PutTxnMeta(TxnId id, const TxnMeta& meta);
@@ -53,8 +56,8 @@ private:
 
     std::mutex mu_;
     std::shared_ptr<lsmkv::DB> kv_;
-    std::unique_ptr<Catalog> catalog_;
-    std::unique_ptr<MvccStore> store_;
+    std::shared_ptr<Catalog> catalog_;
+    std::shared_ptr<MvccStore> store_;
 
     Timestamp next_ts_ = 1;
     TxnId next_txn_id_ = 1;

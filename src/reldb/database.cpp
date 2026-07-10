@@ -31,8 +31,8 @@ lsmkv::Status DecodeTxnMeta(const std::string& bytes, TxnMeta* out) {
 
 Database::Database(std::shared_ptr<lsmkv::DB> kv)
     : kv_(std::move(kv)),
-      catalog_(std::make_unique<Catalog>(kv_)),
-      store_(std::make_unique<MvccStore>(kv_)) {}
+      catalog_(std::make_shared<Catalog>(kv_)),
+      store_(std::make_shared<MvccStore>(kv_)) {}
 
 Database::~Database() = default;
 

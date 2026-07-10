@@ -26,7 +26,12 @@ public:
     TxnId txn_id() const { return txn_id_; }
     bool finished() const { return finished_; }
 
+    // Point lookup by primary key only (v1).
+    // Multi-row query results / table scans / secondary indexes are intentionally
+    // out of scope until the KV layer exposes iterators and we add a scan API.
+    // A future Scan/Query can return many rows without changing this Get contract.
     lsmkv::Status Get(const std::string& table, const Value& pk, Row* out);
+
     lsmkv::Status Commit();
     lsmkv::Status Abort();
 

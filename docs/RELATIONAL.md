@@ -20,7 +20,7 @@ teach *why* SI works the way it does (including what it does **not** prevent).
 
 ## Goals
 
-- Correct `CreateTable` / `Insert` / `Get` / `Update` / `Delete` under transactions
+- Correct `CreateTable` (non-transactional DDL) and transactional `Insert` / `Get` / `Update` / `Delete`
 - MVCC: readers never block writers; each transaction sees a consistent snapshot
 - Snapshot isolation with first-committer-wins write–write conflict detection
 - Durable state via the underlying LSM (WAL + SSTables)
@@ -31,7 +31,7 @@ teach *why* SI works the way it does (including what it does **not** prevent).
 - Full SQL parser / planner / optimizer
 - Secondary indexes, foreign keys, joins
 - Serializable isolation (SSI / true serializability)
-- Range scans / table iterators (point lookups by PK only; needs KV iterators later)
+- Range scans / multi-row queries / table iterators (point lookups by PK only; needs KV iterators later)
 - Distributed transactions, 2PC, replication
 
 ## Layering
@@ -139,6 +139,21 @@ Row        { values by column order or name }
 
 Rows are length-prefixed field encodings (see implementation). Schema changes after
 `CreateTable` are out of scope for v1.
+
+### DDL and transactions
+
+**DDL is not transactional in v1.** `CreateTable` (and any future DDL) applies
+immediately outside user transactions: it is not part of a snapshot, is not
+rolled back by `Transaction::Abort`, and does not participate in SI conflict
+detection. Only DML via `Transaction` is snapshot-isolated.
+
+### Point reads vs multi-row queries
+
+`Transaction::Get` is a **primary-key point lookup** returning at most one row.
+Multi-row results (filters, full table scans, joins) are non-goals until the
+underlying KV exposes iterators and we add an explicit scan/query API. That does
+not preclude a multi-row API later; it keeps v1 focused on correct SI for
+single-key access.
 
 ## Public API (sketch)
 
