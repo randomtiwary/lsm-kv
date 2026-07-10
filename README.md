@@ -141,6 +141,27 @@ An educational **relational database** with **MVCC** storage and **snapshot isol
 sits on top of `lsmkv::DB` (see [docs/RELATIONAL.md](docs/RELATIONAL.md)). It does not
 change LSM internals.
 
+```cpp
+#include "reldb/database.h"
+#include "reldb/txn.h"
+
+reldb::Database* db = nullptr;
+reldb::Database::Open(options, "/tmp/reldb", &db);
+db->CreateTable(schema);
+
+reldb::Transaction* txn = nullptr;
+db->Begin(&txn);
+txn->Insert("users", row);
+txn->Get("users", pk, &row);
+txn->Commit();  // or Abort(); Status::Conflict on write-write conflicts
+delete txn;
+delete db;
+```
+
+Guarantees: **snapshot isolation** with first-committer-wins. Tests document that SI
+still allows **write skew** (not full serializability). Point lookups by primary key
+only in v1 (no SQL parser, no secondary indexes).
+
 ## Implementation roadmap
 
 Work is split into small, independently reviewable PRs (see [docs/DESIGN.md](docs/DESIGN.md)):

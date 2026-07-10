@@ -236,7 +236,7 @@ Remaining items (SI concurrency tests, Option A recovery) follow as normal PRs t
 ## Planned follow-up: crash-safe commit (Option A)
 
 **Status:** TODO — implement after the core SI stack (provisional MVCC → txn
-registry → eager writes); SI concurrency tests may land in parallel.
+registry → eager writes). SI concurrency tests may land in parallel.
 
 There is **no reldb-level WAL**. Multi-Put commit is not atomic; durability is
 per key via `lsmkv` WAL only. Mid-commit crash recovery is **not** implemented yet.
