@@ -11,6 +11,7 @@ std::string Status::ToString() const {
         case kNotSupported: type = "NotSupported"; break;
         case kInvalidArgument: type = "InvalidArgument"; break;
         case kIOError: type = "IOError"; break;
+        case kConflict: type = "Conflict"; break;
     }
     std::string result(type);
     if (!msg_.empty()) {
