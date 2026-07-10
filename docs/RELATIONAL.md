@@ -218,6 +218,42 @@ Work lands on `feature/relational-db` via small PRs, then the feature branch mer
 - **Files:** multi-threaded SI tests, write-skew educational test, README blurb
 - **Description:** Stress overlapping commits; document isolation boundaries.
 
+
+## Planned follow-up: crash-safe commit (Option A)
+
+**Status:** TODO — implement **after** the current PR stack lands on
+`feature/relational-db` (provisional MVCC → txn registry → eager writes → SI tests).
+
+There is **no reldb-level WAL**. Multi-Put commit is not atomic; durability is
+per key via `lsmkv` WAL only. Mid-commit crash recovery is **not** implemented yet.
+
+### Design (agreed)
+
+**Option A — durable commit intent, then apply; recover on Open:**
+
+1. **Prepare:** write `m/txn/<id> = { state: Committing, commit_ts, writes: [(table, pk, version_id), ...] }`
+   (or equivalent intent key listing versions).
+2. **Apply:** stamp provisional versions (`start_ts = commit_ts`), close prior
+   versions (`end_ts`); operations must be **idempotent**.
+3. **Finish:** set `state = Committed` (drop or keep write list).
+
+**On `Database::Open` → `RecoverTxns()`:**
+
+- **Committing** txns: **redo** apply for listed writes, then mark **Committed**.
+- **Open** txns: **abort** — restore heads if they point at that txn's provisional
+  versions, mark **Aborted**.
+
+Commit order invariant remains: never mark **Committed** while any of the txn's
+versions still have `start_ts == 0` (stamp during Apply, then Finish).
+
+### Tests (when implementing)
+
+- Simulate partial apply (intent present, some versions unstamped) → reopen →
+  ends Committed and consistent.
+- Simulate crash with only Open provisionals → reopen → Aborted, heads restored.
+- Multi-key commit becomes atomic w.r.t. recovery (not a single fsync group,
+  but redo makes it so).
+
 ## Open questions
 
 None for v1 — defaults favor the simplest SI implementation that is still correct and
