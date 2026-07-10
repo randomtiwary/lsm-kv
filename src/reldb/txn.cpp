@@ -72,6 +72,28 @@ lsmkv::Status Transaction::Write(const std::string& table, const Value& pk, bool
             // Committed but unstamped: treat as committed live row below via GetRow.
         }
 
+        // First-committer-wins: a committed version newer than our snapshot
+        // means another txn already committed a write on this key.
+        Timestamp walk = head_id;
+        while (walk != 0) {
+            VersionRecord cur;
+            RELDB_RETURN_NOT_OK(db_->store_->GetVersion(table, pk, walk, &cur));
+            if (!cur.is_provisional()) {
+                if (cur.start_ts > start_ts_) {
+                    return STATUS(Conflict, "write-write conflict: key committed after snapshot");
+                }
+                break;  // newest committed is enough
+            }
+            if (cur.created_by != txn_id_) {
+                TxnMeta meta;
+                RELDB_RETURN_NOT_OK(db_->GetTxnMeta(cur.created_by, &meta));
+                if (meta.state == TxnState::kCommitted && meta.commit_ts > start_ts_) {
+                    return STATUS(Conflict, "write-write conflict: key committed after snapshot");
+                }
+            }
+            walk = cur.prev_id;
+        }
+
         // Snapshot check for insert vs update/delete semantics.
         Row existing;
         auto g = db_->store_->GetRow(

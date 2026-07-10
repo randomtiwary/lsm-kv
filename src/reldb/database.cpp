@@ -128,24 +128,69 @@ lsmkv::Status Database::Begin(Transaction** txn) {
     return STATUS(OK);
 }
 
+lsmkv::Status Database::RestoreWrittenHeads(Transaction* txn) {
+    for (auto it = txn->written_.rbegin(); it != txn->written_.rend(); ++it) {
+        Timestamp head = 0;
+        auto st = store_->GetLatestVersionId(it->table, it->pk, &head);
+        if (st.IsNotFound()) continue;
+        RELDB_RETURN_NOT_OK(st);
+        if (head != it->version_id) continue;
+
+        VersionRecord rec;
+        RELDB_RETURN_NOT_OK(store_->GetVersion(it->table, it->pk, it->version_id, &rec));
+        if (rec.prev_id == 0) {
+            RELDB_RETURN_NOT_OK(store_->ClearHead(it->table, it->pk));
+        } else {
+            RELDB_RETURN_NOT_OK(store_->SetHead(it->table, it->pk, rec.prev_id));
+        }
+    }
+    return STATUS(OK);
+}
+
 lsmkv::Status Database::CommitTransaction(Transaction* txn) {
     std::lock_guard<std::mutex> lock(mu_);
     if (txn->finished_) {
         return STATUS(InvalidArgument, "transaction already finished");
     }
 
+    // First-committer-wins re-check before allocating commit_ts.
+    for (const auto& w : txn->written_) {
+        Timestamp head = 0;
+        RELDB_RETURN_NOT_OK(store_->GetLatestVersionId(w.table, w.pk, &head));
+        if (head != w.version_id) {
+            RELDB_RETURN_NOT_OK(RestoreWrittenHeads(txn));
+            TxnMeta aborted;
+            aborted.state = TxnState::kAborted;
+            RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, aborted));
+            txn->finished_ = true;
+            return STATUS(Conflict, "write-write conflict: head moved");
+        }
+
+        VersionRecord rec;
+        RELDB_RETURN_NOT_OK(store_->GetVersion(w.table, w.pk, w.version_id, &rec));
+        if (rec.prev_id != 0) {
+            VersionRecord prev;
+            auto st = store_->GetVersion(w.table, w.pk, rec.prev_id, &prev);
+            if (st.ok() && !prev.is_provisional() && prev.start_ts > txn->start_ts_) {
+                RELDB_RETURN_NOT_OK(RestoreWrittenHeads(txn));
+                TxnMeta aborted;
+                aborted.state = TxnState::kAborted;
+                RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, aborted));
+                txn->finished_ = true;
+                return STATUS(Conflict, "write-write conflict: key committed after snapshot");
+            }
+            if (!st.ok() && !st.IsNotFound()) return st;
+        }
+    }
+
     const Timestamp commit_ts = next_ts_++;
 
-    // Stamp provisional versions and close the prior committed version they
-    // superseded. Early WW already prevented concurrent open writers on a key.
     for (const auto& w : txn->written_) {
         VersionRecord rec;
         RELDB_RETURN_NOT_OK(store_->GetVersion(w.table, w.pk, w.version_id, &rec));
         if (rec.created_by != txn->txn_id_ || !rec.is_provisional()) {
             return STATUS(Corruption, "commit: unexpected version state");
         }
-        rec.start_ts = commit_ts;
-        RELDB_RETURN_NOT_OK(store_->PutVersionValue(w.table, w.pk, rec));
 
         if (rec.prev_id != 0) {
             VersionRecord prev;
@@ -157,6 +202,9 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
                 return st;
             }
         }
+
+        rec.start_ts = commit_ts;
+        RELDB_RETURN_NOT_OK(store_->PutVersionValue(w.table, w.pk, rec));
     }
 
     TxnMeta meta;
@@ -175,23 +223,7 @@ lsmkv::Status Database::AbortTransaction(Transaction* txn) {
         return STATUS(OK);
     }
 
-    // Restore heads for keys whose latest version is our provisional write.
-    for (auto it = txn->written_.rbegin(); it != txn->written_.rend(); ++it) {
-        const auto& w = *it;
-        Timestamp head = 0;
-        auto st = store_->GetLatestVersionId(w.table, w.pk, &head);
-        if (st.IsNotFound()) continue;
-        RELDB_RETURN_NOT_OK(st);
-        if (head != w.version_id) continue;
-
-        VersionRecord rec;
-        RELDB_RETURN_NOT_OK(store_->GetVersion(w.table, w.pk, w.version_id, &rec));
-        if (rec.prev_id == 0) {
-            RELDB_RETURN_NOT_OK(store_->ClearHead(w.table, w.pk));
-        } else {
-            RELDB_RETURN_NOT_OK(store_->SetHead(w.table, w.pk, rec.prev_id));
-        }
-    }
+    RELDB_RETURN_NOT_OK(RestoreWrittenHeads(txn));
 
     TxnMeta meta;
     meta.state = TxnState::kAborted;

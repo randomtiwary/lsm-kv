@@ -55,6 +55,7 @@ private:
 
     lsmkv::Status CommitTransaction(Transaction* txn);
     lsmkv::Status AbortTransaction(Transaction* txn);
+    lsmkv::Status RestoreWrittenHeads(Transaction* txn);
 
     // Serialize begin/write/commit/abort so head + provisional WW checks are safe.
     std::mutex mu_;
