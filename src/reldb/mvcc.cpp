@@ -39,7 +39,6 @@ bool FromHex(const std::string& hex, std::string* out) {
     return true;
 }
 
-// Big-endian fixed64 so future prefix scans order by timestamp.
 void AppendFixed64BE(std::string* dst, Timestamp v) {
     char buf[8];
     for (int i = 7; i >= 0; --i) {
@@ -59,9 +58,11 @@ std::string Fixed64BE(Timestamp v) {
 
 std::string VersionRecord::Encode() const {
     std::string out;
+    lsmkv::PutFixed64(&out, version_id);
     lsmkv::PutFixed64(&out, start_ts);
     lsmkv::PutFixed64(&out, end_ts);
-    lsmkv::PutFixed64(&out, prev_ts);
+    lsmkv::PutFixed64(&out, prev_id);
+    lsmkv::PutFixed64(&out, created_by);
     out.push_back(is_tombstone ? '\x01' : '\x00');
     lsmkv::PutLengthPrefixedSlice(&out, payload);
     return out;
@@ -73,9 +74,11 @@ lsmkv::Status VersionRecord::Decode(const std::string& bytes, VersionRecord* out
     }
     lsmkv::Slice input(bytes);
     VersionRecord rec;
-    if (!lsmkv::GetFixed64(&input, &rec.start_ts) ||
+    if (!lsmkv::GetFixed64(&input, &rec.version_id) ||
+        !lsmkv::GetFixed64(&input, &rec.start_ts) ||
         !lsmkv::GetFixed64(&input, &rec.end_ts) ||
-        !lsmkv::GetFixed64(&input, &rec.prev_ts)) {
+        !lsmkv::GetFixed64(&input, &rec.prev_id) ||
+        !lsmkv::GetFixed64(&input, &rec.created_by)) {
         return STATUS(Corruption, "version: truncated header");
     }
     if (input.empty()) {
@@ -95,11 +98,9 @@ lsmkv::Status VersionRecord::Decode(const std::string& bytes, VersionRecord* out
     return STATUS(OK);
 }
 
-bool IsVisible(const VersionRecord& v, Timestamp snapshot) {
-    // Created after the snapshot → not yet committed from S's point of view.
+bool IsCommittedVisible(const VersionRecord& v, Timestamp snapshot) {
+    if (v.is_provisional()) return false;
     if (v.start_ts > snapshot) return false;
-    // Superseded at or before the snapshot → already replaced/deleted for S.
-    // end_ts == 0 means the version is still live (no upper bound).
     if (v.end_ts != 0 && v.end_ts <= snapshot) return false;
     return true;
 }
@@ -121,81 +122,115 @@ std::string RowHeadKey(const std::string& table, const std::string& pk_key) {
 }
 
 std::string VersionKey(const std::string& table, const std::string& pk_key,
-                       Timestamp start_ts) {
-    return "v/" + table + "/" + pk_key + "/" + Fixed64BE(start_ts);
+                       Timestamp version_id) {
+    return "v/" + table + "/" + pk_key + "/" + Fixed64BE(version_id);
+}
+
+std::string TxnKey(TxnId id) {
+    return "m/txn/" + Fixed64BE(id);
 }
 
 MvccStore::MvccStore(std::shared_ptr<lsmkv::DB> db) : db_(std::move(db)) {}
 
 lsmkv::Status MvccStore::GetVersion(const std::string& table, const Value& pk,
-                                    Timestamp start_ts,
+                                    Timestamp version_id,
                                     VersionRecord* out) const {
     const std::string pk_key = EncodePkForKey(pk);
     std::string bytes;
     RELDB_RETURN_NOT_OK(
-        db_->Get(lsmkv::ReadOptions(), VersionKey(table, pk_key, start_ts), &bytes));
+        db_->Get(lsmkv::ReadOptions(), VersionKey(table, pk_key, version_id), &bytes));
     return VersionRecord::Decode(bytes, out);
 }
 
-lsmkv::Status MvccStore::GetLatestStartTs(const std::string& table, const Value& pk,
-                                          Timestamp* out_ts) const {
+lsmkv::Status MvccStore::GetLatestVersionId(const std::string& table, const Value& pk,
+                                            Timestamp* out_id) const {
     const std::string pk_key = EncodePkForKey(pk);
     std::string bytes;
     RELDB_RETURN_NOT_OK(db_->Get(lsmkv::ReadOptions(), RowHeadKey(table, pk_key), &bytes));
     if (bytes.size() != 8) {
         return STATUS(Corruption, "row head: bad length");
     }
-    *out_ts = lsmkv::DecodeFixed64(bytes.data());
+    *out_id = lsmkv::DecodeFixed64(bytes.data());
     return STATUS(OK);
 }
 
 lsmkv::Status MvccStore::GetRow(const std::string& table, const Value& pk,
-                                Timestamp snapshot, Row* out) const {
+                                Timestamp snapshot, TxnId reader_txn,
+                                const TxnStatusFn& txn_status, Row* out) const {
     if (out == nullptr) {
         return STATUS(InvalidArgument, "null out");
     }
-    Timestamp ts = 0;
-    auto st = GetLatestStartTs(table, pk, &ts);
+    Timestamp id = 0;
+    auto st = GetLatestVersionId(table, pk, &id);
     if (st.IsNotFound()) {
         return STATUS(NotFound, "row not found");
     }
     RELDB_RETURN_NOT_OK(st);
 
-    // Walk prev_ts chain from newest toward oldest until a version is visible
-    // at `snapshot` (see IsVisible / VersionRecord).
-    while (ts != 0) {
+    while (id != 0) {
         VersionRecord rec;
-        RELDB_RETURN_NOT_OK(GetVersion(table, pk, ts, &rec));
+        RELDB_RETURN_NOT_OK(GetVersion(table, pk, id, &rec));
 
-        if (IsVisible(rec, snapshot)) {
+        bool visible = false;
+        if (rec.is_provisional()) {
+            if (rec.created_by == reader_txn) {
+                visible = true;  // read-your-writes
+            } else if (txn_status) {
+                TxnMeta meta;
+                RELDB_RETURN_NOT_OK(txn_status(rec.created_by, &meta));
+                // Commit must stamp start_ts *before* marking the txn Committed,
+                // so we should never observe provisional + Committed. If we do,
+                // the store is inconsistent — fail loud rather than guess.
+                if (meta.state == TxnState::kCommitted) {
+                    return STATUS(Corruption,
+                                  "provisional version owned by committed txn");
+                }
+                // Open (other) or Aborted => not visible to this reader
+            }
+        } else {
+            visible = IsCommittedVisible(rec, snapshot);
+        }
+
+        if (visible) {
             if (rec.is_tombstone) {
                 return STATUS(NotFound, "row deleted at snapshot");
             }
             return Row::Decode(rec.payload, out);
         }
-        ts = rec.prev_ts;
+        id = rec.prev_id;
     }
     return STATUS(NotFound, "no visible version");
 }
 
+lsmkv::Status MvccStore::GetRowCommitted(const std::string& table, const Value& pk,
+                                         Timestamp snapshot, Row* out) const {
+    return GetRow(table, pk, snapshot, /*reader_txn=*/0, /*txn_status=*/nullptr, out);
+}
+
 lsmkv::Status MvccStore::PutVersion(const std::string& table, const Value& pk,
                                     const VersionRecord& rec) {
-    const std::string pk_key = EncodePkForKey(pk);
-    RELDB_RETURN_NOT_OK(db_->Put(lsmkv::WriteOptions(),
-                                 VersionKey(table, pk_key, rec.start_ts), rec.Encode()));
+    RELDB_RETURN_NOT_OK(PutVersionValue(table, pk, rec));
+    return SetHead(table, pk, rec.version_id);
+}
 
+lsmkv::Status MvccStore::PutVersionValue(const std::string& table, const Value& pk,
+                                         const VersionRecord& rec) {
+    const std::string pk_key = EncodePkForKey(pk);
+    return db_->Put(lsmkv::WriteOptions(), VersionKey(table, pk_key, rec.version_id),
+                    rec.Encode());
+}
+
+lsmkv::Status MvccStore::SetHead(const std::string& table, const Value& pk,
+                                 Timestamp version_id) {
+    const std::string pk_key = EncodePkForKey(pk);
     std::string head;
-    lsmkv::PutFixed64(&head, rec.start_ts);
+    lsmkv::PutFixed64(&head, version_id);
     return db_->Put(lsmkv::WriteOptions(), RowHeadKey(table, pk_key), head);
 }
 
-lsmkv::Status MvccStore::CloseVersion(const std::string& table, const Value& pk,
-                                      Timestamp start_ts, Timestamp end_ts) {
-    VersionRecord rec;
-    RELDB_RETURN_NOT_OK(GetVersion(table, pk, start_ts, &rec));
-    rec.end_ts = end_ts;
+lsmkv::Status MvccStore::ClearHead(const std::string& table, const Value& pk) {
     const std::string pk_key = EncodePkForKey(pk);
-    return db_->Put(lsmkv::WriteOptions(), VersionKey(table, pk_key, start_ts), rec.Encode());
+    return db_->Delete(lsmkv::WriteOptions(), RowHeadKey(table, pk_key));
 }
 
 }  // namespace reldb
