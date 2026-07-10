@@ -109,11 +109,11 @@ Optimistic, first-committer-wins (classic SI):
 
 | Step | Action |
 |------|--------|
-| **Begin** | `start_ts = read oracle` (does not advance). Snapshot is `start_ts`. |
-| **Read** | Apply write-set first (read-your-writes); else MVCC read at `start_ts`. |
-| **Write** | Buffer in private write-set (not visible to other txns). |
-| **Commit** | Under a commit mutex: allocate `commit_ts = next_ts++`; for each written PK, if another txn committed a newer version with `start_ts > our start_ts`, **abort (conflict)**; else apply versions at `commit_ts`. |
-| **Abort** | Discard write-set. |
+| **Begin** | Allocate `txn_id`; `start_ts = last committed`; persist txn status **Open**. |
+| **Read** | MVCC walk: own provisional versions + committed versions visible at `start_ts`. |
+| **Write** | Eager durable provisional version (`start_ts=0`, `created_by=txn_id`). **Early WW:** conflict if another **Open** txn already owns the head provisional on this PK. |
+| **Commit** | Stamp provisional versions with `commit_ts`, close prior committed version, mark txn **Committed**. |
+| **Abort** | Mark txn **Aborted**; restore row heads if they still point at our provisional versions. |
 
 ### What SI guarantees
 
