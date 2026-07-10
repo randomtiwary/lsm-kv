@@ -1,3 +1,5 @@
+#include <memory>
+
 #include "test_harness.h"
 #include "test_util.h"
 
@@ -15,14 +17,23 @@ reldb::TableSchema UsersSchema() {
     });
 }
 
+// Open a DB and wrap it in a shared_ptr so tests never call delete.
+std::shared_ptr<lsmkv::DB> OpenKv(const std::string& dir) {
+    lsmkv::Options opt;
+    opt.create_if_missing = true;
+    lsmkv::DB* raw = nullptr;
+    if (!lsmkv::DB::Open(opt, dir, &raw).ok()) {
+        return nullptr;
+    }
+    return std::shared_ptr<lsmkv::DB>(raw);
+}
+
 }  // namespace
 
 TEST(reldb_catalog_create_and_get) {
     auto dir = MakeTempDir("reldb_cat");
-    lsmkv::Options opt;
-    opt.create_if_missing = true;
-    lsmkv::DB* kv = nullptr;
-    expect(lsmkv::DB::Open(opt, dir, &kv).ok(), "open kv");
+    auto kv = OpenKv(dir);
+    expect(kv != nullptr, "open kv");
 
     reldb::Catalog cat(kv);
     expect(cat.CreateTable(UsersSchema()).ok(), "create");
@@ -39,18 +50,16 @@ TEST(reldb_catalog_create_and_get) {
     expect_eq(got.num_columns(), static_cast<std::size_t>(2), "ncols");
     expect(got.columns()[0].primary_key, "pk");
 
-    expect(cat.GetTable("missing", &got).IsNotFound(), "missing");
+    expect(cat.GetTable("missing", &got).IsNotFound(), "missing get");
 
-    delete kv;
+    kv.reset();
     RemoveDirRecursive(dir);
 }
 
 TEST(reldb_catalog_reject_duplicate_and_invalid) {
     auto dir = MakeTempDir("reldb_cat2");
-    lsmkv::Options opt;
-    opt.create_if_missing = true;
-    lsmkv::DB* kv = nullptr;
-    expect(lsmkv::DB::Open(opt, dir, &kv).ok(), "open");
+    auto kv = OpenKv(dir);
+    expect(kv != nullptr, "open");
 
     reldb::Catalog cat(kv);
     expect(cat.CreateTable(UsersSchema()).ok(), "create");
@@ -59,19 +68,15 @@ TEST(reldb_catalog_reject_duplicate_and_invalid) {
     reldb::TableSchema bad("", {{"id", reldb::ColumnType::kInt64, true}});
     expect(cat.CreateTable(bad).IsInvalidArgument(), "invalid schema");
 
-    delete kv;
+    kv.reset();
     RemoveDirRecursive(dir);
 }
 
 TEST(reldb_catalog_persists_across_reopen) {
     auto dir = MakeTempDir("reldb_cat3");
-    bool exists = false;
-    lsmkv::Options opt;
-    opt.create_if_missing = true;
-    lsmkv::DB* kv = nullptr;
-    expect(lsmkv::DB::Open(opt, dir, &kv).ok(), "open");
-
     {
+        auto kv = OpenKv(dir);
+        expect(kv != nullptr, "open");
         reldb::Catalog cat(kv);
         expect(cat.CreateTable(UsersSchema()).ok(), "create");
         reldb::TableSchema accounts("accounts", {
@@ -80,22 +85,22 @@ TEST(reldb_catalog_persists_across_reopen) {
         });
         expect(cat.CreateTable(accounts).ok(), "create accounts");
     }
-    delete kv;
 
-    expect(lsmkv::DB::Open(opt, dir, &kv).ok(), "reopen");
+    auto kv = OpenKv(dir);
+    expect(kv != nullptr, "reopen");
     reldb::Catalog cat2(kv);
     reldb::TableSchema got;
     expect(cat2.GetTable("users", &got).ok(), "users after reopen");
     expect_eq(got.columns()[1].name, std::string("name"), "col");
     expect(cat2.GetTable("accounts", &got).ok(), "accounts after reopen");
     expect(got.columns()[0].type == reldb::ColumnType::kString, "uid type");
-    exists = false;
+    bool exists = false;
     expect(cat2.HasTable("users", &exists).ok(), "has status after reopen");
     expect(exists, "has after reopen");
 
     // Key layout is stable for debugging / future tools.
     expect_eq(reldb::Catalog::TableKey("users"), std::string("c/t/users"), "key");
 
-    delete kv;
+    kv.reset();
     RemoveDirRecursive(dir);
 }

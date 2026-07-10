@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 
@@ -14,9 +15,12 @@ namespace reldb {
 //
 // Keeps an in-memory cache populated on Create / LoadAll / Get (after miss).
 // v1 does not support DROP TABLE or ALTER.
+//
+// Shares ownership of the underlying DB via shared_ptr so Catalog can outlive
+// the creating stack frame without a raw non-owning pointer.
 class Catalog {
 public:
-    explicit Catalog(lsmkv::DB* db);
+    explicit Catalog(std::shared_ptr<lsmkv::DB> db);
 
     // Validate schema, reject duplicates, Put to KV, update cache.
     lsmkv::Status CreateTable(const TableSchema& schema);
@@ -33,7 +37,7 @@ public:
     static std::string TableKey(const std::string& table_name);
 
 private:
-    lsmkv::DB* db_;  // not owned
+    std::shared_ptr<lsmkv::DB> db_;
     // Mutable cache: GetTable is logically const from the caller's view.
     mutable std::unordered_map<std::string, TableSchema> cache_;
 };
