@@ -178,14 +178,14 @@ lsmkv::Status MvccStore::GetRow(const std::string& table, const Value& pk,
             } else if (txn_status) {
                 TxnMeta meta;
                 RELDB_RETURN_NOT_OK(txn_status(rec.created_by, &meta));
+                // Commit must stamp start_ts *before* marking the txn Committed,
+                // so we should never observe provisional + Committed. If we do,
+                // the store is inconsistent — fail loud rather than guess.
                 if (meta.state == TxnState::kCommitted) {
-                    // Writer committed but left start_ts unstamped — treat as
-                    // committed at meta.commit_ts.
-                    VersionRecord committed = rec;
-                    committed.start_ts = meta.commit_ts;
-                    visible = IsCommittedVisible(committed, snapshot);
+                    return STATUS(Corruption,
+                                  "provisional version owned by committed txn");
                 }
-                // Open (other) or Aborted => not visible
+                // Open (other) or Aborted => not visible to this reader
             }
         } else {
             visible = IsCommittedVisible(rec, snapshot);
