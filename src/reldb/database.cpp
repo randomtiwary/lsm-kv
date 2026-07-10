@@ -42,11 +42,9 @@ lsmkv::Status Database::Open(const lsmkv::Options& options, const std::string& p
         return STATUS(InvalidArgument, "null dbptr");
     }
     lsmkv::DB* raw = nullptr;
-    auto st = lsmkv::DB::Open(options, path, &raw);
-    if (!st.ok()) return st;
-
+    RELDB_RETURN_NOT_OK(lsmkv::DB::Open(options, path, &raw));
     auto* db = new Database(std::shared_ptr<lsmkv::DB>(raw));
-    st = db->InitOracles();
+    auto st = db->InitOracles();
     if (!st.ok()) {
         delete db;
         return st;
@@ -56,11 +54,11 @@ lsmkv::Status Database::Open(const lsmkv::Options& options, const std::string& p
 }
 
 lsmkv::Status Database::InitOracles() {
-    auto load = [&](const char* key, Timestamp* dst, Timestamp default_v) -> lsmkv::Status {
+    auto load = [&](const char* key, Timestamp* dst, Timestamp def) -> lsmkv::Status {
         std::string bytes;
         auto st = kv_->Get(lsmkv::ReadOptions(), key, &bytes);
         if (st.IsNotFound()) {
-            *dst = default_v;
+            *dst = def;
             return STATUS(OK);
         }
         RELDB_RETURN_NOT_OK(st);
@@ -68,7 +66,7 @@ lsmkv::Status Database::InitOracles() {
             return STATUS(Corruption, std::string(key) + ": bad length");
         }
         *dst = lsmkv::DecodeFixed64(bytes.data());
-        if (*dst == 0) *dst = default_v;
+        if (*dst == 0) *dst = def;
         return STATUS(OK);
     };
     RELDB_RETURN_NOT_OK(load(kNextTsKey, &next_ts_, 1));
@@ -94,14 +92,10 @@ lsmkv::Status Database::CreateTable(const TableSchema& schema) {
 }
 
 lsmkv::Status Database::GetTxnMeta(TxnId id, TxnMeta* out) const {
-    if (out == nullptr) {
-        return STATUS(InvalidArgument, "null out");
-    }
+    if (out == nullptr) return STATUS(InvalidArgument, "null out");
     std::string bytes;
     auto st = kv_->Get(lsmkv::ReadOptions(), TxnKey(id), &bytes);
-    if (st.IsNotFound()) {
-        return STATUS(NotFound, "txn not found");
-    }
+    if (st.IsNotFound()) return STATUS(NotFound, "txn not found");
     RELDB_RETURN_NOT_OK(st);
     return DecodeTxnMeta(bytes, out);
 }
@@ -111,19 +105,15 @@ lsmkv::Status Database::PutTxnMeta(TxnId id, const TxnMeta& meta) {
 }
 
 lsmkv::Status Database::Begin(Transaction** txn) {
-    if (txn == nullptr) {
-        return STATUS(InvalidArgument, "null txn");
-    }
+    if (txn == nullptr) return STATUS(InvalidArgument, "null txn");
     std::lock_guard<std::mutex> lock(mu_);
     const TxnId id = next_txn_id_++;
     const Timestamp start_ts = next_ts_ - 1;
     RELDB_RETURN_NOT_OK(PersistOracles());
-
     TxnMeta meta;
     meta.state = TxnState::kOpen;
     meta.commit_ts = 0;
     RELDB_RETURN_NOT_OK(PutTxnMeta(id, meta));
-
     *txn = new Transaction(this, id, start_ts);
     return STATUS(OK);
 }
@@ -149,9 +139,7 @@ lsmkv::Status Database::RestoreWrittenHeads(Transaction* txn) {
 
 lsmkv::Status Database::CommitTransaction(Transaction* txn) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (txn->finished_) {
-        return STATUS(InvalidArgument, "transaction already finished");
-    }
+    if (txn->finished_) return STATUS(InvalidArgument, "transaction already finished");
 
     // First-committer-wins re-check before allocating commit_ts.
     for (const auto& w : txn->written_) {
@@ -219,17 +207,12 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
 
 lsmkv::Status Database::AbortTransaction(Transaction* txn) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (txn->finished_) {
-        return STATUS(OK);
-    }
-
+    if (txn->finished_) return STATUS(OK);
     RELDB_RETURN_NOT_OK(RestoreWrittenHeads(txn));
-
     TxnMeta meta;
     meta.state = TxnState::kAborted;
     meta.commit_ts = 0;
     RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, meta));
-
     txn->finished_ = true;
     return STATUS(OK);
 }
