@@ -10,26 +10,23 @@ const char kNextTsKey[] = "m/next_ts";
 
 }  // namespace
 
-Database::Database(lsmkv::DB* kv)
-    : kv_(kv),
-      catalog_(std::make_unique<Catalog>(kv)),
-      store_(std::make_unique<MvccStore>(kv)) {}
+Database::Database(std::shared_ptr<lsmkv::DB> kv)
+    : kv_(std::move(kv)),
+      catalog_(std::make_unique<Catalog>(kv_)),
+      store_(std::make_unique<MvccStore>(kv_)) {}
 
-Database::~Database() {
-    delete kv_;
-    kv_ = nullptr;
-}
+Database::~Database() = default;
 
 lsmkv::Status Database::Open(const lsmkv::Options& options, const std::string& path,
                              Database** dbptr) {
     if (dbptr == nullptr) {
         return lsmkv::Status::InvalidArgument("null dbptr");
     }
-    lsmkv::DB* kv = nullptr;
-    auto st = lsmkv::DB::Open(options, path, &kv);
+    lsmkv::DB* raw = nullptr;
+    auto st = lsmkv::DB::Open(options, path, &raw);
     if (!st.ok()) return st;
 
-    auto* db = new Database(kv);
+    auto* db = new Database(std::shared_ptr<lsmkv::DB>(raw));
     st = db->InitOracle();
     if (!st.ok()) {
         delete db;

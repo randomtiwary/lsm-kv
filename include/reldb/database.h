@@ -16,8 +16,8 @@ namespace reldb {
 
 class Transaction;
 
-// Educational relational database with MVCC + snapshot isolation.
-// Owns an underlying lsmkv::DB.
+// Relational database with MVCC + snapshot isolation.
+// Owns an underlying lsmkv::DB via shared_ptr (shared with Catalog and MvccStore).
 class Database {
 public:
     static lsmkv::Status Open(const lsmkv::Options& options, const std::string& path,
@@ -34,28 +34,25 @@ public:
     // Caller owns the pointer and must Commit() or Abort(), then delete.
     lsmkv::Status Begin(Transaction** txn);
 
-    // Exposed for tests / advanced use.
     Catalog* catalog() { return catalog_.get(); }
     MvccStore* store() { return store_.get(); }
-    lsmkv::DB* kv() { return kv_; }
+    lsmkv::DB* kv() { return kv_.get(); }
 
 private:
     friend class Transaction;
 
-    explicit Database(lsmkv::DB* kv);
+    explicit Database(std::shared_ptr<lsmkv::DB> kv);
 
     lsmkv::Status InitOracle();
     lsmkv::Status PersistOracle();
 
-    // Called by Transaction::Commit / Abort.
     lsmkv::Status CommitTransaction(Transaction* txn);
     void FinishTransaction(Transaction* txn);
 
-    lsmkv::DB* kv_;  // owned
+    std::shared_ptr<lsmkv::DB> kv_;
     std::unique_ptr<Catalog> catalog_;
     std::unique_ptr<MvccStore> store_;
 
-    // Serializes timestamp allocation and version apply (educational SI).
     std::mutex commit_mu_;
     // Next commit timestamp to assign. Begins at 1. Snapshot for new txns is
     // next_ts_ - 1 (everything committed so far).
