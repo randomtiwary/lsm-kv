@@ -37,9 +37,9 @@ TEST(reldb_mvcc_version_record_codec) {
 
     reldb::VersionRecord out;
     expect(reldb::VersionRecord::Decode(v.Encode(), &out).ok(), "decode");
-    expect_eq(out.start_ts, static_cast<std::uint64_t>(5), "start");
-    expect_eq(out.end_ts, static_cast<std::uint64_t>(9), "end");
-    expect_eq(out.prev_ts, static_cast<std::uint64_t>(3), "prev");
+    expect_eq(out.start_ts, static_cast<reldb::Timestamp>(5), "start");
+    expect_eq(out.end_ts, static_cast<reldb::Timestamp>(9), "end");
+    expect_eq(out.prev_ts, static_cast<reldb::Timestamp>(3), "prev");
     expect(!out.is_tombstone, "not tomb");
     expect_eq(out.payload, v.payload, "payload");
 
@@ -100,9 +100,9 @@ TEST(reldb_mvcc_insert_and_read_at_snapshot) {
     expect(store.GetRow("users", pk, /*snapshot=*/9, &row).IsNotFound(), "snap 9");
     expect(store.GetRow("users", pk, /*snapshot=*/100, &row).ok(), "snap 100");
 
-    std::uint64_t latest = 0;
+    reldb::Timestamp latest = 0;
     expect(store.GetLatestStartTs("users", pk, &latest).ok(), "latest");
-    expect_eq(latest, static_cast<std::uint64_t>(10), "latest 10");
+    expect_eq(latest, static_cast<reldb::Timestamp>(10), "latest 10");
 
     RemoveDirRecursive(dir);
 }
@@ -180,7 +180,7 @@ TEST(reldb_mvcc_missing_row) {
     reldb::MvccStore store(kv);
     reldb::Row row;
     expect(store.GetRow("users", reldb::Value::Int64(99), 1, &row).IsNotFound(), "miss");
-    std::uint64_t ts = 0;
+    reldb::Timestamp ts = 0;
     expect(store.GetLatestStartTs("users", reldb::Value::Int64(99), &ts).IsNotFound(),
            "no head");
     RemoveDirRecursive(dir);

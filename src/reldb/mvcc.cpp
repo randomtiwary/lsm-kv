@@ -40,7 +40,7 @@ bool FromHex(const std::string& hex, std::string* out) {
 }
 
 // Big-endian fixed64 so future prefix scans order by timestamp.
-void AppendFixed64BE(std::string* dst, std::uint64_t v) {
+void AppendFixed64BE(std::string* dst, Timestamp v) {
     char buf[8];
     for (int i = 7; i >= 0; --i) {
         buf[i] = static_cast<char>(v & 0xff);
@@ -49,7 +49,7 @@ void AppendFixed64BE(std::string* dst, std::uint64_t v) {
     dst->append(buf, 8);
 }
 
-std::string Fixed64BE(std::uint64_t v) {
+std::string Fixed64BE(Timestamp v) {
     std::string s;
     AppendFixed64BE(&s, v);
     return s;
@@ -95,7 +95,7 @@ lsmkv::Status VersionRecord::Decode(const std::string& bytes, VersionRecord* out
     return STATUS(OK);
 }
 
-bool IsVisible(const VersionRecord& v, std::uint64_t snapshot) {
+bool IsVisible(const VersionRecord& v, Timestamp snapshot) {
     // Created after the snapshot → not yet committed from S's point of view.
     if (v.start_ts > snapshot) return false;
     // Superseded at or before the snapshot → already replaced/deleted for S.
@@ -121,14 +121,14 @@ std::string RowHeadKey(const std::string& table, const std::string& pk_key) {
 }
 
 std::string VersionKey(const std::string& table, const std::string& pk_key,
-                       std::uint64_t start_ts) {
+                       Timestamp start_ts) {
     return "v/" + table + "/" + pk_key + "/" + Fixed64BE(start_ts);
 }
 
 MvccStore::MvccStore(std::shared_ptr<lsmkv::DB> db) : db_(std::move(db)) {}
 
 lsmkv::Status MvccStore::GetVersion(const std::string& table, const Value& pk,
-                                    std::uint64_t start_ts,
+                                    Timestamp start_ts,
                                     VersionRecord* out) const {
     const std::string pk_key = EncodePkForKey(pk);
     std::string bytes;
@@ -138,7 +138,7 @@ lsmkv::Status MvccStore::GetVersion(const std::string& table, const Value& pk,
 }
 
 lsmkv::Status MvccStore::GetLatestStartTs(const std::string& table, const Value& pk,
-                                          std::uint64_t* out_ts) const {
+                                          Timestamp* out_ts) const {
     const std::string pk_key = EncodePkForKey(pk);
     std::string bytes;
     RELDB_RETURN_NOT_OK(db_->Get(lsmkv::ReadOptions(), RowHeadKey(table, pk_key), &bytes));
@@ -150,11 +150,11 @@ lsmkv::Status MvccStore::GetLatestStartTs(const std::string& table, const Value&
 }
 
 lsmkv::Status MvccStore::GetRow(const std::string& table, const Value& pk,
-                                std::uint64_t snapshot, Row* out) const {
+                                Timestamp snapshot, Row* out) const {
     if (out == nullptr) {
         return STATUS(InvalidArgument, "null out");
     }
-    std::uint64_t ts = 0;
+    Timestamp ts = 0;
     auto st = GetLatestStartTs(table, pk, &ts);
     if (st.IsNotFound()) {
         return STATUS(NotFound, "row not found");
@@ -190,7 +190,7 @@ lsmkv::Status MvccStore::PutVersion(const std::string& table, const Value& pk,
 }
 
 lsmkv::Status MvccStore::CloseVersion(const std::string& table, const Value& pk,
-                                      std::uint64_t start_ts, std::uint64_t end_ts) {
+                                      Timestamp start_ts, Timestamp end_ts) {
     VersionRecord rec;
     RELDB_RETURN_NOT_OK(GetVersion(table, pk, start_ts, &rec));
     rec.end_ts = end_ts;
