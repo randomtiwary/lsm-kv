@@ -19,8 +19,7 @@ using Timestamp = lsmkv::Timestamp;
 class Transaction;
 
 // Relational database with MVCC + snapshot isolation.
-// This PR: open DB, catalog, txn registry, Begin / read-only Get / empty Commit / Abort.
-// Eager writes land in the follow-up PR.
+// Owns an underlying lsmkv::DB via shared_ptr (shared with Catalog and MvccStore).
 class Database {
 public:
     static lsmkv::Status Open(const lsmkv::Options& options, const std::string& path,
@@ -31,10 +30,12 @@ public:
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
 
-    // DDL is NOT transactional in v1: it commits immediately outside any
-    // user Transaction (no snapshot, no rollback with Abort). See docs/RELATIONAL.md.
+    // DDL is NOT transactional in v1: applies immediately outside any user
+    // Transaction (no snapshot, no Abort rollback). See docs/RELATIONAL.md.
     lsmkv::Status CreateTable(const TableSchema& schema);
 
+    // Allocates a Transaction with a fresh txn_id and start_ts = last commit.
+    // Caller owns the pointer and must Commit() or Abort(), then delete.
     lsmkv::Status Begin(Transaction** txn);
 
     std::shared_ptr<Catalog> catalog() const { return catalog_; }
@@ -53,6 +54,7 @@ private:
     lsmkv::Status PersistOracles();
     lsmkv::Status CommitTransaction(Transaction* txn);
     lsmkv::Status AbortTransaction(Transaction* txn);
+    lsmkv::Status RestoreWrittenHeads(Transaction* txn);
 
     std::mutex mu_;
     std::shared_ptr<lsmkv::DB> kv_;
