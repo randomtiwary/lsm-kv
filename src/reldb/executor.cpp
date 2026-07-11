@@ -68,19 +68,16 @@ lsmkv::Status EnsureOpenable(bool* opened) {
 // Collect
 // ---------------------------------------------------------------------------
 
-lsmkv::Status Collect(Executor* exec, QueryResult* result) {
-    if (exec == nullptr || result == nullptr) {
-        return STATUS(InvalidArgument, "null exec or result");
-    }
-    result->Clear();
-    RELDB_RETURN_NOT_OK(exec->Open());
-    result->column_names = exec->column_names();
-    result->plan_tag = exec->PlanTag();
+lsmkv::Status Collect(Executor& exec, QueryResult& result) {
+    result.Clear();
+    RELDB_RETURN_NOT_OK(exec.Open());
+    result.column_names = exec.column_names();
+    result.plan_tag = exec.PlanTag();
     bool has_row = false;
     for (;;) {
-        RELDB_RETURN_NOT_OK(exec->Next(&has_row));
+        RELDB_RETURN_NOT_OK(exec.Next(&has_row));
         if (!has_row) break;
-        result->rows.push_back(exec->current_row());
+        result.rows.push_back(exec.current_row());
     }
     return STATUS(OK);
 }
@@ -89,13 +86,12 @@ lsmkv::Status Collect(Executor* exec, QueryResult* result) {
 // SeqScan
 // ---------------------------------------------------------------------------
 
-SeqScanExecutor::SeqScanExecutor(Transaction* txn, TableSchema schema)
-    : txn_(txn), schema_(std::move(schema)), column_names_(ColumnNamesFromSchema(schema_)) {}
+SeqScanExecutor::SeqScanExecutor(Transaction& txn, const TableSchema& schema)
+    : txn_(txn), schema_(schema), column_names_(ColumnNamesFromSchema(schema_)) {}
 
 lsmkv::Status SeqScanExecutor::Open() {
-    if (txn_ == nullptr) return STATUS(InvalidArgument, "null txn");
     RELDB_RETURN_NOT_OK(EnsureOpenable(&opened_));
-    RELDB_RETURN_NOT_OK(txn_->Scan(schema_.name(), nullptr, nullptr, &scan_));
+    RELDB_RETURN_NOT_OK(txn_.Scan(schema_.name(), nullptr, nullptr, &scan_));
     return STATUS(OK);
 }
 
@@ -123,16 +119,15 @@ const Row& SeqScanExecutor::current_row() const { return current_; }
 // PkPointGet
 // ---------------------------------------------------------------------------
 
-PkPointGetExecutor::PkPointGetExecutor(Transaction* txn, TableSchema schema, Value pk)
+PkPointGetExecutor::PkPointGetExecutor(Transaction& txn, const TableSchema& schema, Value pk)
     : txn_(txn),
-      schema_(std::move(schema)),
+      schema_(schema),
       pk_(std::move(pk)),
       column_names_(ColumnNamesFromSchema(schema_)) {}
 
 lsmkv::Status PkPointGetExecutor::Open() {
-    if (txn_ == nullptr) return STATUS(InvalidArgument, "null txn");
     RELDB_RETURN_NOT_OK(EnsureOpenable(&opened_));
-    auto st = txn_->Get(schema_.name(), pk_, &current_);
+    auto st = txn_.Get(schema_.name(), pk_, &current_);
     if (st.IsNotFound()) {
         found_ = false;
         return STATUS(OK);
@@ -160,27 +155,20 @@ const Row& PkPointGetExecutor::current_row() const { return current_; }
 // PkRangeScan
 // ---------------------------------------------------------------------------
 
-PkRangeScanExecutor::PkRangeScanExecutor(Transaction* txn, TableSchema schema,
-                                         const Value* start_pk, const Value* end_pk)
+PkRangeScanExecutor::PkRangeScanExecutor(Transaction& txn, const TableSchema& schema,
+                                         std::optional<Value> start_pk,
+                                         std::optional<Value> end_pk)
     : txn_(txn),
-      schema_(std::move(schema)),
-      column_names_(ColumnNamesFromSchema(schema_)) {
-    if (start_pk != nullptr) {
-        has_start_ = true;
-        start_pk_ = *start_pk;
-    }
-    if (end_pk != nullptr) {
-        has_end_ = true;
-        end_pk_ = *end_pk;
-    }
-}
+      schema_(schema),
+      start_pk_(std::move(start_pk)),
+      end_pk_(std::move(end_pk)),
+      column_names_(ColumnNamesFromSchema(schema_)) {}
 
 lsmkv::Status PkRangeScanExecutor::Open() {
-    if (txn_ == nullptr) return STATUS(InvalidArgument, "null txn");
     RELDB_RETURN_NOT_OK(EnsureOpenable(&opened_));
-    const Value* start = has_start_ ? &start_pk_ : nullptr;
-    const Value* end = has_end_ ? &end_pk_ : nullptr;
-    RELDB_RETURN_NOT_OK(txn_->Scan(schema_.name(), start, end, &scan_));
+    const Value* start = start_pk_ ? &*start_pk_ : nullptr;
+    const Value* end = end_pk_ ? &*end_pk_ : nullptr;
+    RELDB_RETURN_NOT_OK(txn_.Scan(schema_.name(), start, end, &scan_));
     return STATUS(OK);
 }
 
@@ -208,10 +196,10 @@ const Row& PkRangeScanExecutor::current_row() const { return current_; }
 // Filter
 // ---------------------------------------------------------------------------
 
-FilterExecutor::FilterExecutor(std::unique_ptr<Executor> child, TableSchema input_schema,
+FilterExecutor::FilterExecutor(std::unique_ptr<Executor> child, const TableSchema& input_schema,
                                std::unique_ptr<Expr> predicate)
     : child_(std::move(child)),
-      input_schema_(std::move(input_schema)),
+      input_schema_(input_schema),
       predicate_(std::move(predicate)) {}
 
 lsmkv::Status FilterExecutor::Open() {
@@ -258,10 +246,10 @@ std::string FilterExecutor::PlanTag() const {
 // Project
 // ---------------------------------------------------------------------------
 
-ProjectExecutor::ProjectExecutor(std::unique_ptr<Executor> child, TableSchema input_schema,
+ProjectExecutor::ProjectExecutor(std::unique_ptr<Executor> child, const TableSchema& input_schema,
                                  std::vector<Projection> projections)
     : child_(std::move(child)),
-      input_schema_(std::move(input_schema)),
+      input_schema_(input_schema),
       projections_(std::move(projections)) {
     column_names_.reserve(projections_.size());
     for (const auto& p : projections_) {
@@ -321,7 +309,6 @@ lsmkv::Status SortExecutor::Open() {
     RELDB_RETURN_NOT_OK(EnsureOpenable(&opened_));
     plan_tag_ = "Sort<-" + child_->PlanTag();
     RELDB_RETURN_NOT_OK(child_->Open());
-    // After Open, child PlanTag may still be valid; keep the pre-Open snapshot.
     column_names_ = child_->column_names();
 
     bool has_row = false;
@@ -434,18 +421,15 @@ std::string LimitExecutor::PlanTag() const {
 // InsertOp
 // ---------------------------------------------------------------------------
 
-InsertOp::InsertOp(Transaction* txn, std::string table, std::vector<Row> rows)
+InsertOp::InsertOp(Transaction& txn, std::string table, std::vector<Row> rows)
     : txn_(txn), table_(std::move(table)), rows_(std::move(rows)) {}
 
-lsmkv::Status InsertOp::Execute(QueryResult* result) {
-    if (txn_ == nullptr || result == nullptr) {
-        return STATUS(InvalidArgument, "null txn or result");
-    }
-    result->Clear();
-    result->plan_tag = PlanTag();
+lsmkv::Status InsertOp::Execute(QueryResult& result) {
+    result.Clear();
+    result.plan_tag = PlanTag();
     for (const auto& row : rows_) {
-        RELDB_RETURN_NOT_OK(txn_->Insert(table_, row));
-        ++result->rows_affected;
+        RELDB_RETURN_NOT_OK(txn_.Insert(table_, row));
+        ++result.rows_affected;
     }
     return STATUS(OK);
 }
@@ -454,10 +438,10 @@ lsmkv::Status InsertOp::Execute(QueryResult* result) {
 // UpdateOp
 // ---------------------------------------------------------------------------
 
-UpdateOp::UpdateOp(Transaction* txn, TableSchema schema, std::unique_ptr<Executor> source,
+UpdateOp::UpdateOp(Transaction& txn, const TableSchema& schema, std::unique_ptr<Executor> source,
                    std::vector<Assignment> assignments)
     : txn_(txn),
-      schema_(std::move(schema)),
+      schema_(schema),
       source_(std::move(source)),
       assignments_(std::move(assignments)) {}
 
@@ -465,10 +449,7 @@ std::string UpdateOp::PlanTag() const {
     return "Update<-" + (source_ ? source_->PlanTag() : std::string("?"));
 }
 
-lsmkv::Status UpdateOp::Execute(QueryResult* result) {
-    if (txn_ == nullptr || result == nullptr) {
-        return STATUS(InvalidArgument, "null txn or result");
-    }
+lsmkv::Status UpdateOp::Execute(QueryResult& result) {
     if (source_ == nullptr) return STATUS(InvalidArgument, "null source");
     if (assignments_.empty()) return STATUS(InvalidArgument, "empty assignments");
 
@@ -476,12 +457,13 @@ lsmkv::Status UpdateOp::Execute(QueryResult* result) {
     const std::string tag = PlanTag();
 
     RELDB_RETURN_NOT_OK(source_->Open());
-    for (auto& a : assignments_) {
+    for (const auto& a : assignments_) {
         if (a.expr == nullptr) return STATUS(InvalidArgument, "null assignment expr");
         if (a.column_index < 0 ||
             static_cast<std::size_t>(a.column_index) >= schema_.num_columns()) {
             return STATUS(InvalidArgument, "assignment column out of range");
         }
+        // Bind mutates Expr::column_index_; unique_ptr is non-const via get().
         RELDB_RETURN_NOT_OK(a.expr->Bind(schema_));
     }
 
@@ -495,8 +477,8 @@ lsmkv::Status UpdateOp::Execute(QueryResult* result) {
     // Destroy scan before writes (Transaction::Scan contract).
     source_.reset();
 
-    result->Clear();
-    result->plan_tag = tag;
+    result.Clear();
+    result.plan_tag = tag;
     for (const auto& old_row : targets) {
         Row new_row = old_row;
         for (const auto& a : assignments_) {
@@ -511,8 +493,8 @@ lsmkv::Status UpdateOp::Execute(QueryResult* result) {
         if (old_pk != new_pk) {
             return STATUS(InvalidArgument, "UPDATE must not change primary key");
         }
-        RELDB_RETURN_NOT_OK(txn_->Update(schema_.name(), new_row));
-        ++result->rows_affected;
+        RELDB_RETURN_NOT_OK(txn_.Update(schema_.name(), new_row));
+        ++result.rows_affected;
     }
     return STATUS(OK);
 }
@@ -521,17 +503,14 @@ lsmkv::Status UpdateOp::Execute(QueryResult* result) {
 // DeleteOp
 // ---------------------------------------------------------------------------
 
-DeleteOp::DeleteOp(Transaction* txn, TableSchema schema, std::unique_ptr<Executor> source)
-    : txn_(txn), schema_(std::move(schema)), source_(std::move(source)) {}
+DeleteOp::DeleteOp(Transaction& txn, const TableSchema& schema, std::unique_ptr<Executor> source)
+    : txn_(txn), schema_(schema), source_(std::move(source)) {}
 
 std::string DeleteOp::PlanTag() const {
     return "Delete<-" + (source_ ? source_->PlanTag() : std::string("?"));
 }
 
-lsmkv::Status DeleteOp::Execute(QueryResult* result) {
-    if (txn_ == nullptr || result == nullptr) {
-        return STATUS(InvalidArgument, "null txn or result");
-    }
+lsmkv::Status DeleteOp::Execute(QueryResult& result) {
     if (source_ == nullptr) return STATUS(InvalidArgument, "null source");
 
     const std::string tag = PlanTag();
@@ -548,11 +527,11 @@ lsmkv::Status DeleteOp::Execute(QueryResult* result) {
     }
     source_.reset();
 
-    result->Clear();
-    result->plan_tag = tag;
+    result.Clear();
+    result.plan_tag = tag;
     for (const auto& pk : pks) {
-        RELDB_RETURN_NOT_OK(txn_->Delete(schema_.name(), pk));
-        ++result->rows_affected;
+        RELDB_RETURN_NOT_OK(txn_.Delete(schema_.name(), pk));
+        ++result.rows_affected;
     }
     return STATUS(OK);
 }

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,9 +25,10 @@ namespace reldb {
 // TableRowScan is destroyed before writes (required by Transaction::Scan).
 //
 // Ownership:
-//   - Transaction* is non-owning; must outlive the executor.
+//   - Transaction& is non-owning; the txn must outlive the executor.
 //   - Children and expression trees are owned via unique_ptr.
-//   - TableSchema is copied (small); name() is the table name for access paths.
+//   - TableSchema is accepted by const reference and copied into the operator
+//     (small; name() is the table name for access paths).
 //
 // Scan lifetime: destroy scan-bearing executors (or fully exhaust them) before
 // Commit / Abort / further writes on the same transaction. TableRowScan may
@@ -62,13 +64,13 @@ public:
     virtual std::string PlanTag() const = 0;
 };
 
-// Drain an opened plan into a QueryResult (column_names, rows, plan_tag).
-lsmkv::Status Collect(Executor* exec, QueryResult* result);
+// Drain a plan into a QueryResult (column_names, rows, plan_tag).
+lsmkv::Status Collect(Executor& exec, QueryResult& result);
 
 // Full-table scan in PK / KV key order. Uses Transaction::Scan(table, null, null).
 class SeqScanExecutor : public Executor {
 public:
-    SeqScanExecutor(Transaction* txn, TableSchema schema);
+    SeqScanExecutor(Transaction& txn, const TableSchema& schema);
 
     lsmkv::Status Open() override;
     lsmkv::Status Next(bool* has_row) override;
@@ -77,7 +79,7 @@ public:
     std::string PlanTag() const override { return "SeqScan"; }
 
 private:
-    Transaction* txn_;
+    Transaction& txn_;
     TableSchema schema_;
     std::vector<std::string> column_names_;
     std::unique_ptr<TableRowScan> scan_;
@@ -88,7 +90,7 @@ private:
 // Primary-key point lookup via Transaction::Get. Yields 0 or 1 row.
 class PkPointGetExecutor : public Executor {
 public:
-    PkPointGetExecutor(Transaction* txn, TableSchema schema, Value pk);
+    PkPointGetExecutor(Transaction& txn, const TableSchema& schema, Value pk);
 
     lsmkv::Status Open() override;
     lsmkv::Status Next(bool* has_row) override;
@@ -97,7 +99,7 @@ public:
     std::string PlanTag() const override { return "PkPointGet"; }
 
 private:
-    Transaction* txn_;
+    Transaction& txn_;
     TableSchema schema_;
     Value pk_;
     std::vector<std::string> column_names_;
@@ -107,13 +109,12 @@ private:
     Row current_;
 };
 
-// PK range scan: start inclusive, end exclusive (null bounds = unbounded).
+// PK range scan: start inclusive, end exclusive (nullopt bounds = unbounded).
 // Matches Transaction::Scan half-open semantics.
 class PkRangeScanExecutor : public Executor {
 public:
-    // Pass nullptr for an open bound on either side.
-    PkRangeScanExecutor(Transaction* txn, TableSchema schema, const Value* start_pk,
-                        const Value* end_pk);
+    PkRangeScanExecutor(Transaction& txn, const TableSchema& schema,
+                        std::optional<Value> start_pk, std::optional<Value> end_pk);
 
     lsmkv::Status Open() override;
     lsmkv::Status Next(bool* has_row) override;
@@ -122,12 +123,10 @@ public:
     std::string PlanTag() const override { return "PkRangeScan"; }
 
 private:
-    Transaction* txn_;
+    Transaction& txn_;
     TableSchema schema_;
-    bool has_start_ = false;
-    bool has_end_ = false;
-    Value start_pk_;
-    Value end_pk_;
+    std::optional<Value> start_pk_;
+    std::optional<Value> end_pk_;
     std::vector<std::string> column_names_;
     std::unique_ptr<TableRowScan> scan_;
     bool opened_ = false;
@@ -138,7 +137,7 @@ private:
 // input_schema describes child's row layout for expression evaluation.
 class FilterExecutor : public Executor {
 public:
-    FilterExecutor(std::unique_ptr<Executor> child, TableSchema input_schema,
+    FilterExecutor(std::unique_ptr<Executor> child, const TableSchema& input_schema,
                    std::unique_ptr<Expr> predicate);
 
     lsmkv::Status Open() override;
@@ -162,7 +161,7 @@ struct Projection {
 
 class ProjectExecutor : public Executor {
 public:
-    ProjectExecutor(std::unique_ptr<Executor> child, TableSchema input_schema,
+    ProjectExecutor(std::unique_ptr<Executor> child, const TableSchema& input_schema,
                     std::vector<Projection> projections);
 
     lsmkv::Status Open() override;
@@ -229,16 +228,16 @@ private:
 // DML (one-shot) operators
 // ---------------------------------------------------------------------------
 
-// INSERT one or more rows. Sets result->rows_affected.
+// INSERT one or more rows. Sets result.rows_affected.
 class InsertOp {
 public:
-    InsertOp(Transaction* txn, std::string table, std::vector<Row> rows);
+    InsertOp(Transaction& txn, std::string table, std::vector<Row> rows);
 
-    lsmkv::Status Execute(QueryResult* result);
+    lsmkv::Status Execute(QueryResult& result);
     std::string PlanTag() const { return "Insert"; }
 
 private:
-    Transaction* txn_;
+    Transaction& txn_;
     std::string table_;
     std::vector<Row> rows_;
 };
@@ -254,14 +253,14 @@ struct Assignment {
 // (enforced by comparing PrimaryKey before/after).
 class UpdateOp {
 public:
-    UpdateOp(Transaction* txn, TableSchema schema, std::unique_ptr<Executor> source,
+    UpdateOp(Transaction& txn, const TableSchema& schema, std::unique_ptr<Executor> source,
              std::vector<Assignment> assignments);
 
-    lsmkv::Status Execute(QueryResult* result);
+    lsmkv::Status Execute(QueryResult& result);
     std::string PlanTag() const;
 
 private:
-    Transaction* txn_;
+    Transaction& txn_;
     TableSchema schema_;
     std::unique_ptr<Executor> source_;
     std::vector<Assignment> assignments_;
@@ -270,13 +269,13 @@ private:
 // DELETE rows produced by source. Materializes the child fully before any write.
 class DeleteOp {
 public:
-    DeleteOp(Transaction* txn, TableSchema schema, std::unique_ptr<Executor> source);
+    DeleteOp(Transaction& txn, const TableSchema& schema, std::unique_ptr<Executor> source);
 
-    lsmkv::Status Execute(QueryResult* result);
+    lsmkv::Status Execute(QueryResult& result);
     std::string PlanTag() const;
 
 private:
-    Transaction* txn_;
+    Transaction& txn_;
     TableSchema schema_;
     std::unique_ptr<Executor> source_;
 };

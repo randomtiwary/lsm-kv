@@ -1,4 +1,5 @@
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,15 +39,15 @@ std::shared_ptr<reldb::Database> OpenDb(const std::string& dir) {
 }
 
 // Seed users (1,ada,10), (2,bob,30), (3,cy,20) committed.
-void SeedUsers(reldb::Database* db) {
+void SeedUsers(reldb::Database& db) {
     const auto schema = UsersSchema();
-    EXPECT_OK(db->CreateTable(schema), "create");
+    EXPECT_OK(db.CreateTable(schema), "create");
     std::unique_ptr<reldb::Transaction> txn;
-    EXPECT_OK(db->Begin(&txn), "begin seed");
-    reldb::InsertOp ins(txn.get(), "users",
+    EXPECT_OK(db.Begin(&txn), "begin seed");
+    reldb::InsertOp ins(*txn, "users",
                         {User(1, "ada", 10), User(2, "bob", 30), User(3, "cy", 20)});
     reldb::QueryResult r;
-    EXPECT_OK(ins.Execute(&r), "seed insert");
+    EXPECT_OK(ins.Execute(r), "seed insert");
     expect_eq(r.rows_affected, static_cast<std::uint64_t>(3), "seed n");
     EXPECT_OK(txn->Commit(), "seed commit");
 }
@@ -58,15 +59,15 @@ TEST(reldb_exec_seq_scan) {
     {
         auto db = OpenDb(dir);
         expect(db != nullptr, "open");
-        SeedUsers(db.get());
+        SeedUsers(*db);
 
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "begin");
         reldb::QueryResult r;
         {
             // Destroy the scan executor before the txn ends (iterator lock).
-            auto scan = std::make_unique<reldb::SeqScanExecutor>(txn.get(), UsersSchema());
-            EXPECT_OK(reldb::Collect(scan.get(), &r), "collect");
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, UsersSchema());
+            EXPECT_OK(reldb::Collect(*scan, r), "collect");
         }
         expect_eq(r.plan_tag, std::string("SeqScan"), "tag");
         expect_eq(static_cast<int>(r.rows.size()), 3, "3 rows");
@@ -84,15 +85,15 @@ TEST(reldb_exec_pk_point_get) {
     {
         auto db = OpenDb(dir);
         expect(db != nullptr, "open");
-        SeedUsers(db.get());
+        SeedUsers(*db);
 
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "begin");
         reldb::QueryResult r;
         {
             auto get = std::make_unique<reldb::PkPointGetExecutor>(
-                txn.get(), UsersSchema(), reldb::Value::Int64(2));
-            EXPECT_OK(reldb::Collect(get.get(), &r), "collect");
+                *txn, UsersSchema(), reldb::Value::Int64(2));
+            EXPECT_OK(reldb::Collect(*get, r), "collect");
         }
         expect_eq(r.plan_tag, std::string("PkPointGet"), "tag");
         expect_eq(static_cast<int>(r.rows.size()), 1, "one");
@@ -100,8 +101,8 @@ TEST(reldb_exec_pk_point_get) {
 
         {
             auto miss = std::make_unique<reldb::PkPointGetExecutor>(
-                txn.get(), UsersSchema(), reldb::Value::Int64(99));
-            EXPECT_OK(reldb::Collect(miss.get(), &r), "miss");
+                *txn, UsersSchema(), reldb::Value::Int64(99));
+            EXPECT_OK(reldb::Collect(*miss, r), "miss");
         }
         expect_eq(static_cast<int>(r.rows.size()), 0, "empty");
         expect_eq(r.plan_tag, std::string("PkPointGet"), "tag miss");
@@ -115,17 +116,15 @@ TEST(reldb_exec_pk_range_scan) {
     {
         auto db = OpenDb(dir);
         expect(db != nullptr, "open");
-        SeedUsers(db.get());
+        SeedUsers(*db);
 
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "begin");
-        const reldb::Value start = reldb::Value::Int64(1);
-        const reldb::Value end = reldb::Value::Int64(3);  // exclusive
         reldb::QueryResult r;
         {
-            auto scan = std::make_unique<reldb::PkRangeScanExecutor>(txn.get(), UsersSchema(),
-                                                                     &start, &end);
-            EXPECT_OK(reldb::Collect(scan.get(), &r), "collect");
+            auto scan = std::make_unique<reldb::PkRangeScanExecutor>(
+                *txn, UsersSchema(), reldb::Value::Int64(1), reldb::Value::Int64(3));
+            EXPECT_OK(reldb::Collect(*scan, r), "collect");
         }
         expect_eq(r.plan_tag, std::string("PkRangeScan"), "tag");
         expect_eq(static_cast<int>(r.rows.size()), 2, "1,2");
@@ -141,7 +140,7 @@ TEST(reldb_exec_filter_project_limit) {
     {
         auto db = OpenDb(dir);
         expect(db != nullptr, "open");
-        SeedUsers(db.get());
+        SeedUsers(*db);
         const auto schema = UsersSchema();
 
         std::unique_ptr<reldb::Transaction> txn;
@@ -153,7 +152,7 @@ TEST(reldb_exec_filter_project_limit) {
         {
             auto pred = reldb::Expr::Compare(reldb::CmpOp::kGt, reldb::Expr::Column("score"),
                                              reldb::Expr::Literal(reldb::Value::Int64(15)));
-            auto scan = std::make_unique<reldb::SeqScanExecutor>(txn.get(), schema);
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, schema);
             auto filter = std::make_unique<reldb::FilterExecutor>(std::move(scan), schema,
                                                                   std::move(pred));
             std::vector<reldb::Projection> projs;
@@ -161,7 +160,7 @@ TEST(reldb_exec_filter_project_limit) {
             auto project = std::make_unique<reldb::ProjectExecutor>(std::move(filter), schema,
                                                                     std::move(projs));
             auto limit = std::make_unique<reldb::LimitExecutor>(std::move(project), 1);
-            EXPECT_OK(reldb::Collect(limit.get(), &r), "collect");
+            EXPECT_OK(reldb::Collect(*limit, r), "collect");
         }
         expect_eq(r.plan_tag, std::string("Limit<-Project<-Filter<-SeqScan"), "tag");
         expect_eq(static_cast<int>(r.rows.size()), 1, "limit 1");
@@ -179,7 +178,7 @@ TEST(reldb_exec_sort) {
     {
         auto db = OpenDb(dir);
         expect(db != nullptr, "open");
-        SeedUsers(db.get());
+        SeedUsers(*db);
         const auto schema = UsersSchema();
 
         std::unique_ptr<reldb::Transaction> txn;
@@ -187,10 +186,10 @@ TEST(reldb_exec_sort) {
 
         reldb::QueryResult r;
         {
-            auto scan = std::make_unique<reldb::SeqScanExecutor>(txn.get(), schema);
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, schema);
             std::vector<reldb::SortKey> keys = {{/*score*/ 2, true}};
             auto sort = std::make_unique<reldb::SortExecutor>(std::move(scan), std::move(keys));
-            EXPECT_OK(reldb::Collect(sort.get(), &r), "collect");
+            EXPECT_OK(reldb::Collect(*sort, r), "collect");
         }
         expect_eq(r.plan_tag, std::string("Sort<-SeqScan"), "tag");
         expect_eq(static_cast<int>(r.rows.size()), 3, "3");
@@ -208,7 +207,7 @@ TEST(reldb_exec_update_delete) {
     {
         auto db = OpenDb(dir);
         expect(db != nullptr, "open");
-        SeedUsers(db.get());
+        SeedUsers(*db);
         const auto schema = UsersSchema();
 
         // UPDATE users SET score = 99 WHERE id = 1  via PkPointGet source
@@ -216,12 +215,12 @@ TEST(reldb_exec_update_delete) {
             std::unique_ptr<reldb::Transaction> txn;
             EXPECT_OK(db->Begin(&txn), "begin upd");
             auto src = std::make_unique<reldb::PkPointGetExecutor>(
-                txn.get(), schema, reldb::Value::Int64(1));
+                *txn, schema, reldb::Value::Int64(1));
             std::vector<reldb::Assignment> assigns;
             assigns.push_back({/*score*/ 2, reldb::Expr::Literal(reldb::Value::Int64(99))});
-            reldb::UpdateOp upd(txn.get(), schema, std::move(src), std::move(assigns));
+            reldb::UpdateOp upd(*txn, schema, std::move(src), std::move(assigns));
             reldb::QueryResult r;
-            EXPECT_OK(upd.Execute(&r), "update");
+            EXPECT_OK(upd.Execute(r), "update");
             expect_eq(r.rows_affected, static_cast<std::uint64_t>(1), "1 upd");
             expect_eq(r.plan_tag, std::string("Update<-PkPointGet"), "upd tag");
             EXPECT_OK(txn->Commit(), "commit upd");
@@ -240,12 +239,12 @@ TEST(reldb_exec_update_delete) {
                 auto pred = reldb::Expr::Compare(
                     reldb::CmpOp::kGe, reldb::Expr::Column("score"),
                     reldb::Expr::Literal(reldb::Value::Int64(30)));
-                auto scan = std::make_unique<reldb::SeqScanExecutor>(txn.get(), schema);
+                auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, schema);
                 auto filter = std::make_unique<reldb::FilterExecutor>(
                     std::move(scan), schema, std::move(pred));
                 // DeleteOp materializes + resets source before writes.
-                reldb::DeleteOp del(txn.get(), schema, std::move(filter));
-                EXPECT_OK(del.Execute(&r), "delete");
+                reldb::DeleteOp del(*txn, schema, std::move(filter));
+                EXPECT_OK(del.Execute(r), "delete");
             }
             // bob score 30, ada 99 → both match; cy 20 stays
             expect_eq(r.rows_affected, static_cast<std::uint64_t>(2), "2 del");
@@ -258,8 +257,8 @@ TEST(reldb_exec_update_delete) {
             EXPECT_OK(db->Begin(&txn), "begin check");
             reldb::QueryResult r;
             {
-                auto scan = std::make_unique<reldb::SeqScanExecutor>(txn.get(), schema);
-                EXPECT_OK(reldb::Collect(scan.get(), &r), "left");
+                auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, schema);
+                EXPECT_OK(reldb::Collect(*scan, r), "left");
             }
             expect_eq(static_cast<int>(r.rows.size()), 1, "only cy");
             expect_eq(r.rows[0].at(1).GetString(), std::string("cy"), "cy");
@@ -280,19 +279,19 @@ TEST(reldb_exec_insert_and_filter_uncommitted) {
 
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "begin");
-        reldb::InsertOp ins(txn.get(), "users", {User(7, "grace", 5)});
+        reldb::InsertOp ins(*txn, "users", {User(7, "grace", 5)});
         reldb::QueryResult r;
-        EXPECT_OK(ins.Execute(&r), "insert");
+        EXPECT_OK(ins.Execute(r), "insert");
         expect_eq(r.rows_affected, static_cast<std::uint64_t>(1), "1");
         expect_eq(r.plan_tag, std::string("Insert"), "ins tag");
 
         {
             auto pred = reldb::Expr::Compare(reldb::CmpOp::kEq, reldb::Expr::Column("id"),
                                              reldb::Expr::Literal(reldb::Value::Int64(7)));
-            auto scan = std::make_unique<reldb::SeqScanExecutor>(txn.get(), schema);
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, schema);
             auto filter = std::make_unique<reldb::FilterExecutor>(std::move(scan), schema,
                                                                   std::move(pred));
-            EXPECT_OK(reldb::Collect(filter.get(), &r), "filter");
+            EXPECT_OK(reldb::Collect(*filter, r), "filter");
         }
         expect_eq(static_cast<int>(r.rows.size()), 1, "sees insert");
         expect_eq(r.rows[0].at(1).GetString(), std::string("grace"), "grace");
@@ -306,18 +305,18 @@ TEST(reldb_exec_update_rejects_pk_change) {
     {
         auto db = OpenDb(dir);
         expect(db != nullptr, "open");
-        SeedUsers(db.get());
+        SeedUsers(*db);
         const auto schema = UsersSchema();
 
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "begin");
-        auto src = std::make_unique<reldb::PkPointGetExecutor>(txn.get(), schema,
+        auto src = std::make_unique<reldb::PkPointGetExecutor>(*txn, schema,
                                                                reldb::Value::Int64(1));
         std::vector<reldb::Assignment> assigns;
         assigns.push_back({/*id PK*/ 0, reldb::Expr::Literal(reldb::Value::Int64(42))});
-        reldb::UpdateOp upd(txn.get(), schema, std::move(src), std::move(assigns));
+        reldb::UpdateOp upd(*txn, schema, std::move(src), std::move(assigns));
         reldb::QueryResult r;
-        expect(upd.Execute(&r).IsInvalidArgument(), "pk change rejected");
+        expect(upd.Execute(r).IsInvalidArgument(), "pk change rejected");
         EXPECT_OK(txn->Abort(), "abort");
     }
     RemoveDirRecursive(dir);
