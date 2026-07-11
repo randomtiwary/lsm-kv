@@ -1,5 +1,6 @@
 // Minimal walk-through of the relational MVCC API.
 #include <iostream>
+#include <memory>
 
 #include "lsmkv/options.h"
 #include "reldb/database.h"
@@ -11,7 +12,7 @@
 int main() {
     lsmkv::Options opt;
     opt.create_if_missing = true;
-    reldb::Database* db = nullptr;
+    std::unique_ptr<reldb::Database> db;
     auto st = reldb::Database::Open(opt, "/tmp/reldb_example", &db);
     if (!st.ok()) {
         std::cerr << "open: " << st.ToString() << "\n";
@@ -25,11 +26,10 @@ int main() {
     st = db->CreateTable(schema);
     if (!st.ok() && st.ToString().find("already exists") == std::string::npos) {
         std::cerr << "create: " << st.ToString() << "\n";
-        delete db;
         return 1;
     }
 
-    reldb::Transaction* txn = nullptr;
+    std::unique_ptr<reldb::Transaction> txn;
     db->Begin(&txn);
     reldb::Row row({reldb::Value::Int64(1), reldb::Value::String("ada")});
     st = txn->Insert("users", row);
@@ -40,8 +40,6 @@ int main() {
         std::cout << "insert (maybe exists): " << st.ToString() << "\n";
         txn->Abort();
     }
-    delete txn;
-
     db->Begin(&txn);
     reldb::Row got;
     st = txn->Get("users", reldb::Value::Int64(1), &got);
@@ -51,7 +49,5 @@ int main() {
         std::cout << "get: " << st.ToString() << "\n";
     }
     txn->Abort();
-    delete txn;
-    delete db;
     return 0;
 }

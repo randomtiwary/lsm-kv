@@ -159,22 +159,20 @@ single-key access.
 ```cpp
 #include "reldb/database.h"
 
-reldb::Database* db = nullptr;
+std::unique_ptr<reldb::Database> db;
 reldb::Database::Open(options, path, &db);
 
 db->CreateTable(schema);
 
-reldb::Transaction* txn = nullptr;
+std::unique_ptr<reldb::Transaction> txn;
 db->Begin(&txn);
 
 txn->Insert("users", row);
 txn->Get("users", pk_value, &row);
-txn->Update("users", pk_value, row);
+txn->Update("users", row);
 txn->Delete("users", pk_value);
 
 txn->Commit();   // or txn->Abort();
-delete txn;
-delete db;
 ```
 
 ## Concurrency model

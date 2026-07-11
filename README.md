@@ -145,17 +145,15 @@ change LSM internals.
 #include "reldb/database.h"
 #include "reldb/txn.h"
 
-reldb::Database* db = nullptr;
+std::unique_ptr<reldb::Database> db;
 reldb::Database::Open(options, "/tmp/reldb", &db);
 db->CreateTable(schema);
 
-reldb::Transaction* txn = nullptr;
+std::unique_ptr<reldb::Transaction> txn;
 db->Begin(&txn);
 txn->Insert("users", row);
 txn->Get("users", pk, &row);
 txn->Commit();  // or Abort(); Status::Conflict on write-write conflicts
-delete txn;
-delete db;
 ```
 
 Guarantees: **snapshot isolation** with first-committer-wins. Tests document that SI

@@ -1,3 +1,4 @@
+#include <memory>
 #include "test_harness.h"
 #include "test_util.h"
 
@@ -15,10 +16,10 @@ reldb::TableSchema UsersSchema() {
     });
 }
 
-reldb::Database* OpenDb(const std::string& dir) {
+std::unique_ptr<reldb::Database> OpenDb(const std::string& dir) {
     lsmkv::Options opt;
     opt.create_if_missing = true;
-    reldb::Database* db = nullptr;
+    std::unique_ptr<reldb::Database> db;
     if (!reldb::Database::Open(opt, dir, &db).ok()) return nullptr;
     return db;
 }
@@ -33,11 +34,11 @@ TEST(reldb_status_conflict) {
 
 TEST(reldb_txn_begin_commit_abort_registry) {
     auto dir = MakeTempDir("reldb_reg1");
-    reldb::Database* db = OpenDb(dir);
+    std::unique_ptr<reldb::Database> db = OpenDb(dir);
     expect(db != nullptr, "open");
     expect(db->CreateTable(UsersSchema()).ok(), "create");
 
-    reldb::Transaction* txn = nullptr;
+    std::unique_ptr<reldb::Transaction> txn;
     expect(db->Begin(&txn).ok(), "begin");
     expect(txn->txn_id() >= 1, "txn id");
     expect_eq(txn->start_ts(), static_cast<reldb::Timestamp>(0), "snap0");
@@ -51,15 +52,14 @@ TEST(reldb_txn_begin_commit_abort_registry) {
     expect(txn->Commit().ok(), "commit empty");
     expect(db->GetTxnMeta(txn->txn_id(), &meta).ok(), "meta2");
     expect(meta.state == reldb::TxnState::kCommitted, "committed");
-    delete txn;
-
     expect(db->Begin(&txn).ok(), "begin2");
     expect(txn->start_ts() >= 1, "snap advanced");
     expect(txn->Abort().ok(), "abort");
     expect(db->GetTxnMeta(txn->txn_id(), &meta).ok(), "meta3");
     expect(meta.state == reldb::TxnState::kAborted, "aborted");
-    delete txn;
-    delete db;
+    // Destroy owned handles before wiping the data directory.
+    txn.reset();
+    db.reset();
     RemoveDirRecursive(dir);
 }
 
@@ -67,22 +67,19 @@ TEST(reldb_txn_registry_persists) {
     auto dir = MakeTempDir("reldb_reg2");
     reldb::TxnId id = 0;
     {
-        reldb::Database* db = OpenDb(dir);
+        std::unique_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
-        reldb::Transaction* txn = nullptr;
+        std::unique_ptr<reldb::Transaction> txn;
         expect(db->Begin(&txn).ok(), "begin");
         id = txn->txn_id();
         expect(txn->Commit().ok(), "commit");
-        delete txn;
-        delete db;
     }
     {
-        reldb::Database* db = OpenDb(dir);
+        std::unique_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "reopen");
         reldb::TxnMeta meta;
         expect(db->GetTxnMeta(id, &meta).ok(), "load");
         expect(meta.state == reldb::TxnState::kCommitted, "still committed");
-        delete db;
     }
     RemoveDirRecursive(dir);
 }
