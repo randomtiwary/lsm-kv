@@ -12,7 +12,7 @@ the existing `lsmkv::DB` key-value engine. The layer provides:
 - Tables with named columns and a single primary key
 - Multi-version concurrency control (**MVCC**) for row storage
 - **Snapshot isolation (SI)** for transactions
-- A programmatic C++ API (no SQL parser in v1)
+- A programmatic C++ API (SQL layer planned separately — see [SQL.md](SQL.md))
 
 Clarity beats performance. The design prefers explicit data structures and tests that
 teach *why* SI works the way it does (including what it does **not** prevent).

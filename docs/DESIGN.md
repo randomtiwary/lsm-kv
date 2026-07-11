@@ -122,6 +122,13 @@ A simple relational database on top of `lsmkv::DB` lives under `include/reldb/` 
 
 **→ [docs/RELATIONAL.md](RELATIONAL.md)** (PRs 12–17; core stack on `main`)
 
+## SQL layer (planned)
+
+Educational SQL (including `BEGIN`/`COMMIT`), table scan, and a rule-based optimizer
+land on branch **`feature/sql-layer`**. Design and PR plan:
+
+**→ [docs/SQL.md](SQL.md)**
+
 ## Open Questions
 
 None — defaults favor simplicity for an educational codebase.
