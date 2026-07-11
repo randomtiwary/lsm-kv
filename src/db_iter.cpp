@@ -191,18 +191,18 @@ public:
 
     void SeekToFirst() override {
         merge_.SeekToFirst();
-        FindNextUser();
+        AdvanceToNextVisibleKey();
     }
 
     void Seek(const Slice& target) override {
         // Same lookup key shape as MemTable::Get / Version::Get.
         std::string ikey = MakeLookupKey(target, snapshot_);
         merge_.Seek(ikey);
-        FindNextUser();
+        AdvanceToNextVisibleKey();
     }
 
     void Next() override {
-        FindNextUser();
+        AdvanceToNextVisibleKey();
     }
 
     Slice key() const override { return Slice(user_key_); }
@@ -221,7 +221,11 @@ private:
         merge_.Add(std::make_unique<SSTableInternalIter>(std::move(table)));
     }
 
-    void FindNextUser() {
+    // From the current merge position, skip internal keys that are invisible at
+    // snapshot_ or are tombstones, and stop on the next live user-key/value pair.
+    // Call after SeekToFirst/Seek (which place the merge cursor) or after the
+    // previous entry has been consumed via Next.
+    void AdvanceToNextVisibleKey() {
         valid_ = false;
         user_key_.clear();
         user_value_.clear();
@@ -237,8 +241,8 @@ private:
                 merge_.Next();
                 continue;
             }
-            // First internal key for this user at-or-before snapshot (highest seq).
-            const Slice uk = ExtractUserKey(ikey);
+            // First internal key for this user key at-or-before snapshot (highest seq).
+            const Slice user_key_slice = ExtractUserKey(ikey);
             const ValueType type = ExtractValueType(ikey);
             const bool is_deletion = (type == kTypeDeletion);
             std::string value;
@@ -246,20 +250,20 @@ private:
                 Slice v = merge_.value();
                 value.assign(v.data(), v.size());
             }
-            const std::string user(uk.data(), uk.size());
+            const std::string this_user_key(user_key_slice.data(), user_key_slice.size());
 
             // Skip remaining versions of the same user key.
             merge_.Next();
             while (merge_.Valid()) {
                 Slice next_ikey = merge_.key();
-                if (ExtractUserKey(next_ikey).compare(Slice(user)) != 0) break;
+                if (ExtractUserKey(next_ikey).compare(Slice(this_user_key)) != 0) break;
                 merge_.Next();
             }
 
             if (is_deletion) {
                 continue;  // hide tombstone
             }
-            user_key_ = user;
+            user_key_ = this_user_key;
             user_value_ = std::move(value);
             valid_ = true;
             return;
