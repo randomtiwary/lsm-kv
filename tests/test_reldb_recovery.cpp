@@ -35,7 +35,7 @@ std::shared_ptr<reldb::Database> OpenDb(const std::string& dir) {
 // in-memory handles without Abort/Commit.
 void SimulateCrashDrop(std::unique_ptr<reldb::Transaction>& txn,
                        std::shared_ptr<reldb::Database>& db) {
-    txn->AbandonWithoutAbort();  // drop shared Database ref without Abort
+    txn->TEST_AbandonWithoutAbort();  // drop shared Database ref without Abort
     txn.reset();
     db.reset();
 }

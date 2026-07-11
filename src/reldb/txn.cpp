@@ -211,7 +211,7 @@ TableRowScan::TableRowScan(std::shared_ptr<Database> db, TxnId txn_id, Timestamp
       end_key_(std::move(end_key)),
       has_end_(has_end),
       it_(std::move(it)) {
-    Advance();
+    status_ = Advance();
 }
 
 TableRowScan::~TableRowScan() = default;
@@ -219,52 +219,50 @@ TableRowScan::~TableRowScan() = default;
 void TableRowScan::Next() {
     if (!valid_) return;
     it_->Next();
-    Advance();
+    status_ = Advance();
 }
 
-void TableRowScan::Advance() {
+lsmkv::Status TableRowScan::Advance() {
     valid_ = false;
     pk_ = Value();
     row_ = Row();
-    if (!status_.ok()) return;
+    RELDB_RETURN_NOT_OK(status_);
 
     while (it_->Valid()) {
-        status_ = it_->status();
-        if (!status_.ok()) return;
+        RELDB_RETURN_NOT_OK(it_->status());
 
         const lsmkv::Slice key = it_->key();
         if (!HasPrefix(key, prefix_)) {
-            return;  // left the table prefix
+            return STATUS(OK);  // left the table prefix
         }
         if (has_end_ && key.compare(lsmkv::Slice(end_key_)) >= 0) {
-            return;  // exclusive end bound
+            return STATUS(OK);  // exclusive end bound
         }
 
         const std::string pk_hex = PkHexFromHeadKey(key, prefix_);
         Value pk;
-        status_ = DecodePkFromKey(pk_hex, &pk);
-        if (!status_.ok()) return;
+        RELDB_RETURN_NOT_OK(DecodePkFromKey(pk_hex, &pk));
 
         Row row;
+        lsmkv::Status st;
         {
             std::lock_guard<std::mutex> lock(db_->mu_);
-            status_ = db_->store_->GetRow(
+            st = db_->store_->GetRow(
                 table_, pk, start_ts_, txn_id_,
                 [this](TxnId id, TxnMeta* m) { return db_->GetTxnMeta(id, m); }, &row);
         }
-        if (status_.IsNotFound()) {
-            status_ = STATUS(OK);
+        if (st.IsNotFound()) {
             it_->Next();
             continue;  // no live version at this snapshot
         }
-        if (!status_.ok()) return;
+        RELDB_RETURN_NOT_OK(st);
 
         pk_ = std::move(pk);
         row_ = std::move(row);
         valid_ = true;
-        return;
+        return STATUS(OK);
     }
-    status_ = it_->status();
+    return it_->status();
 }
 
 lsmkv::Status Transaction::Scan(const std::string& table, const Value* start_pk,
@@ -310,7 +308,7 @@ lsmkv::Status Transaction::Abort() {
     return db_->AbortTransaction(this);
 }
 
-void Transaction::AbandonWithoutAbort() {
+void Transaction::TEST_AbandonWithoutAbort() {
     finished_ = true;
     db_.reset();
 }

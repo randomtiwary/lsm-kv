@@ -45,7 +45,7 @@ private:
                  std::unique_ptr<lsmkv::Iterator> it);
 
     // Advance KV iterator to the next head key in range with a visible live row.
-    void Advance();
+    lsmkv::Status Advance();
 
     std::shared_ptr<Database> db_;
     TxnId txn_id_;
@@ -98,7 +98,7 @@ public:
 
     // Crash-recovery tests only: mark finished and drop the Database reference
     // without Abort/Commit (simulates process death leaving Open provisionals).
-    void AbandonWithoutAbort();
+    void TEST_AbandonWithoutAbort();
 
 private:
     friend class Database;
