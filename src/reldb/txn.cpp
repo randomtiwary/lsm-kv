@@ -136,6 +136,16 @@ lsmkv::Status Transaction::Write(const std::string& table, const Value& pk, bool
     w.pk = pk;
     w.version_id = vid;
     written_.push_back(std::move(w));
+
+    // Durable write list on Open meta so crash recovery can restore heads.
+    TxnMeta meta;
+    meta.state = TxnState::kOpen;
+    meta.commit_ts = 0;
+    meta.writes.reserve(written_.size());
+    for (const auto& wk : written_) {
+        meta.writes.push_back(TxnWrite{wk.table, wk.pk, wk.version_id});
+    }
+    RELDB_RETURN_NOT_OK(db_->PutTxnMeta(txn_id_, meta));
     return STATUS(OK);
 }
 

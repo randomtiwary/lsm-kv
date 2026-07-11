@@ -202,7 +202,7 @@ Commits are serialized for simplicity (educational correctness over throughput).
 ## PR Plan
 
 Core stack (PRs 12–16) was developed on `feature/relational-db` and merged to `main`.
-Remaining items (SI concurrency tests, Option A recovery) follow as normal PRs to `main`.
+SI concurrency tests are on `main`; Option A recovery follows as a normal PR to `main`.
 
 ### PR 12: Design + library scaffold
 - **Files:** `docs/RELATIONAL.md`, `docs/DESIGN.md` (pointer), CMake `src/reldb/`,
@@ -231,40 +231,30 @@ Remaining items (SI concurrency tests, Option A recovery) follow as normal PRs t
 - **Description:** Stress overlapping commits; document isolation boundaries.
 
 
-## Planned follow-up: crash-safe commit (Option A)
+## Crash-safe commit (Option A)
 
-**Status:** TODO — implement after the core SI stack (provisional MVCC → txn
-registry → eager writes). SI concurrency tests may land in parallel.
+**Status:** implemented.
 
-There is **no reldb-level WAL**. Multi-Put commit is not atomic; durability is
-per key via `lsmkv` WAL only. Mid-commit crash recovery is **not** implemented yet.
+There is **no reldb-level WAL**. Multi-Put commit is not atomic at the KV layer;
+durability is per key via `lsmkv` WAL. Atomicity of multi-key commit is achieved
+with a durable **Committing** intent and **idempotent redo** on `Open`.
 
-### Design (agreed)
+### Protocol
 
-**Option A — durable commit intent, then apply; recover on Open:**
-
-1. **Prepare:** write `m/txn/<id> = { state: Committing, commit_ts, writes: [(table, pk, version_id), ...] }`
-   (or equivalent intent key listing versions).
+1. **Prepare:** write `m/txn/<id> = { state: Committing, commit_ts, writes: [(table, pk, version_id), ...] }`.
 2. **Apply:** stamp provisional versions (`start_ts = commit_ts`), close prior
-   versions (`end_ts`); operations must be **idempotent**.
-3. **Finish:** set `state = Committed` (drop or keep write list).
+   versions (`end_ts`); operations are **idempotent**.
+3. **Finish:** set `state = Committed` (write list dropped).
 
 **On `Database::Open` → `RecoverTxns()`:**
 
-- **Committing** txns: **redo** apply for listed writes, then mark **Committed**.
-- **Open** txns: **abort** — restore heads if they point at that txn's provisional
-  versions, mark **Aborted**.
+- **Committing** txns: **redo** apply for listed writes, mark **Committed**, advance
+  the timestamp oracle past `commit_ts` if needed.
+- **Open** txns: **abort** — restore heads when the durable write list is present
+  (Open meta is updated on each new provisional write), mark **Aborted**.
 
-Commit order invariant remains: never mark **Committed** while any of the txn's
-versions still have `start_ts == 0` (stamp during Apply, then Finish).
-
-### Tests (when implementing)
-
-- Simulate partial apply (intent present, some versions unstamped) → reopen →
-  ends Committed and consistent.
-- Simulate crash with only Open provisionals → reopen → Aborted, heads restored.
-- Multi-key commit becomes atomic w.r.t. recovery (not a single fsync group,
-  but redo makes it so).
+Commit order invariant: never mark **Committed** while any of the txn's versions
+still have `start_ts == 0` (stamp during Apply, then Finish).
 
 ## Open questions
 

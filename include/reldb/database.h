@@ -54,8 +54,13 @@ private:
 
     lsmkv::Status InitOracles();
     lsmkv::Status PersistOracles();
+    // Crash recovery (Option A): finish Committing txns; abort Open txns.
+    lsmkv::Status RecoverTxns();
     lsmkv::Status CommitTransaction(Transaction* txn);
     lsmkv::Status AbortTransaction(Transaction* txn);
+    lsmkv::Status ApplyCommitWrites(TxnId txn_id, Timestamp commit_ts,
+                                    const std::vector<TxnWrite>& writes);
+    lsmkv::Status RestoreHeads(const std::vector<TxnWrite>& writes);
     lsmkv::Status RestoreWrittenHeads(Transaction* txn);
 
     std::mutex mu_;
