@@ -37,10 +37,10 @@ reldb::Row Doctor(std::int64_t id, std::int64_t on_call) {
     return reldb::Row({reldb::Value::Int64(id), reldb::Value::Int64(on_call)});
 }
 
-std::unique_ptr<reldb::Database> OpenDb(const std::string& dir) {
+std::shared_ptr<reldb::Database> OpenDb(const std::string& dir) {
     lsmkv::Options opt;
     opt.create_if_missing = true;
-    std::unique_ptr<reldb::Database> db;
+    std::shared_ptr<reldb::Database> db;
     if (!reldb::Database::Open(opt, dir, &db).ok()) return nullptr;
     return db;
 }
@@ -73,7 +73,7 @@ bool CommitWithRetry(reldb::Database* db, Fn&& fn, int max_attempts = 10000) {
 TEST(reldb_si_concurrent_disjoint_inserts) {
     auto dir = MakeTempDir("reldb_si1");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -116,7 +116,7 @@ TEST(reldb_si_concurrent_contended_updates) {
     // Conflicts are expected; retries must converge to exactly N successful bumps.
     auto dir = MakeTempDir("reldb_si2");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -166,7 +166,7 @@ TEST(reldb_si_concurrent_contended_updates) {
 TEST(reldb_si_concurrent_readers_during_writes) {
     auto dir = MakeTempDir("reldb_si3");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -231,7 +231,7 @@ TEST(reldb_si_concurrent_readers_during_writes) {
 TEST(reldb_si_allows_write_skew) {
     auto dir = MakeTempDir("reldb_si4");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(DoctorsSchema()), "create");
 
@@ -279,7 +279,7 @@ TEST(reldb_si_lost_update_prevented) {
     // Two transactions read the same value and both try to write — one must Conflict.
     auto dir = MakeTempDir("reldb_si5");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 

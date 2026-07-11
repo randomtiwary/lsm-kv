@@ -158,7 +158,7 @@ Table/range **scan** and SQL are designed in [SQL.md](SQL.md) (KV iterator →
 ```cpp
 #include "reldb/database.h"
 
-std::unique_ptr<reldb::Database> db;
+std::shared_ptr<reldb::Database> db;
 reldb::Database::Open(options, path, &db);
 
 db->CreateTable(schema);

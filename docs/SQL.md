@@ -104,7 +104,7 @@ Row heads are stored at `d/<table>/<pk_hex>`. Scan:
 
 ```cpp
 // Cursor over rows visible to this transaction. unique_ptr ownership.
-class RowScan {
+class TableRowScan {
  public:
   bool Valid() const;
   void Next();
@@ -118,7 +118,7 @@ class RowScan {
 Status Transaction::Scan(const std::string& table,
                          const Value* start_pk,  // nullable
                          const Value* end_pk,    // nullable
-                         std::unique_ptr<RowScan>* out);
+                         std::unique_ptr<TableRowScan>* out);
 ```
 
 SI: all rows seen are consistent with `start_ts_` and `txn_id_` (same as `Get`).
@@ -299,7 +299,7 @@ chosen path without hard-coding operator pointers.
 ```cpp
 #include "reldb/sql.h"
 
-std::unique_ptr<reldb::Database> db;
+std::shared_ptr<reldb::Database> db;
 reldb::Database::Open(opt, path, &db);
 
 reldb::SqlSession session(db.get());
@@ -337,7 +337,7 @@ Do not require both to interleave on the same session object in v1 (document if
 |----|--------|-------------|
 | **00** | Design + pointers | This doc; links from `RELATIONAL.md` / `DESIGN.md` |
 | **01** | KV `DB::Iterator` | Public iterator + tests |
-| **02** | reldb `Scan` | `Transaction::Scan` / `RowScan` + SI tests |
+| **02** | reldb `Scan` | `Transaction::Scan` / `TableRowScan` + SI tests |
 | **03** | Expr + `QueryResult` | AST eval, result types + unit tests |
 | **04** | Physical executors | Operators + hand-built plan tests |
 | **05** | Lexer + parser | SQL text → AST + tests |
