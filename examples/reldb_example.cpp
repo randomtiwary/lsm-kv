@@ -29,25 +29,39 @@ int main() {
         return 1;
     }
 
-    std::unique_ptr<reldb::Transaction> txn;
-    db->Begin(&txn);
-    reldb::Row row({reldb::Value::Int64(1), reldb::Value::String("ada")});
-    st = txn->Insert("users", row);
-    if (st.ok()) {
-        st = txn->Commit();
-        std::cout << "insert commit: " << st.ToString() << "\n";
-    } else {
-        std::cout << "insert (maybe exists): " << st.ToString() << "\n";
+    {
+        std::unique_ptr<reldb::Transaction> txn;
+        st = db->Begin(&txn);
+        if (!st.ok()) {
+            std::cerr << "begin: " << st.ToString() << "\n";
+            return 1;
+        }
+        reldb::Row row({reldb::Value::Int64(1), reldb::Value::String("ada")});
+        st = txn->Insert("users", row);
+        if (st.ok()) {
+            st = txn->Commit();
+            std::cout << "insert commit: " << st.ToString() << "\n";
+        } else {
+            std::cout << "insert (maybe exists): " << st.ToString() << "\n";
+            txn->Abort();
+        }
+    }
+
+    {
+        std::unique_ptr<reldb::Transaction> txn;
+        st = db->Begin(&txn);
+        if (!st.ok()) {
+            std::cerr << "begin2: " << st.ToString() << "\n";
+            return 1;
+        }
+        reldb::Row got;
+        st = txn->Get("users", reldb::Value::Int64(1), &got);
+        if (st.ok()) {
+            std::cout << "user 1 name = " << got.at(1).GetString() << "\n";
+        } else {
+            std::cout << "get: " << st.ToString() << "\n";
+        }
         txn->Abort();
     }
-    db->Begin(&txn);
-    reldb::Row got;
-    st = txn->Get("users", reldb::Value::Int64(1), &got);
-    if (st.ok()) {
-        std::cout << "user 1 name = " << got.at(1).GetString() << "\n";
-    } else {
-        std::cout << "get: " << st.ToString() << "\n";
-    }
-    txn->Abort();
     return 0;
 }

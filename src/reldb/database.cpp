@@ -105,9 +105,10 @@ lsmkv::Status Database::PutTxnMeta(TxnId id, const TxnMeta& meta) {
 
 lsmkv::Status Database::Begin(std::unique_ptr<Transaction>* txn) {
     if (txn == nullptr) return STATUS(InvalidArgument, "null txn");
-    // Drop any previous txn outside mu_: Transaction::~Transaction may Abort()
-    // which also needs mu_ (reusing a unique_ptr slot for a new Begin).
-    txn->reset();
+    // Caller must pass an empty unique_ptr; do not silently replace an open txn.
+    if (txn->get() != nullptr) {
+        return STATUS(InvalidArgument, "txn already holds a transaction");
+    }
     std::lock_guard<std::mutex> lock(mu_);
     const TxnId id = next_txn_id_++;
     const Timestamp start_ts = next_ts_ - 1;

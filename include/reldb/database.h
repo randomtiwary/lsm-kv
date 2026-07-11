@@ -36,6 +36,7 @@ public:
     lsmkv::Status CreateTable(const TableSchema& schema);
 
     // Allocates a Transaction with a fresh txn_id and start_ts = last commit.
+    // *txn must be empty (get() == nullptr); otherwise InvalidArgument.
     // Caller owns the unique_ptr; Commit() or Abort() before destroy (dtor aborts).
     lsmkv::Status Begin(std::unique_ptr<Transaction>* txn);
 
