@@ -1,6 +1,7 @@
 #include "reldb/database.h"
 
 #include "lsmkv/encoding.h"
+#include "lsmkv/slice.h"
 #include "reldb/macros.h"
 #include "reldb/txn.h"
 
@@ -11,19 +12,59 @@ const char kNextTsKey[] = "m/next_ts";
 const char kNextTxnKey[] = "m/next_txn";
 const char kNextVidKey[] = "m/next_vid";
 
+// TxnMeta wire format:
+//   state(1) + commit_ts(8)  [legacy / no write list]
+//   state(1) + commit_ts(8) + n(4) + n * (len-prefixed table, len-prefixed pk_hex, version_id(8))
 std::string EncodeTxnMeta(const TxnMeta& meta) {
     std::string out;
     out.push_back(static_cast<char>(meta.state));
     lsmkv::PutFixed64(&out, meta.commit_ts);
+    if (!meta.writes.empty()) {
+        lsmkv::PutFixed32(&out, static_cast<std::uint32_t>(meta.writes.size()));
+        for (const auto& w : meta.writes) {
+            lsmkv::PutLengthPrefixedSlice(&out, lsmkv::Slice(w.table));
+            const std::string pk_hex = EncodePkForKey(w.pk);
+            lsmkv::PutLengthPrefixedSlice(&out, lsmkv::Slice(pk_hex));
+            lsmkv::PutFixed64(&out, w.version_id);
+        }
+    }
     return out;
 }
 
 lsmkv::Status DecodeTxnMeta(const std::string& bytes, TxnMeta* out) {
-    if (bytes.size() != 1 + 8) {
+    if (bytes.size() < 1 + 8) {
         return STATUS(Corruption, "txn meta: bad length");
     }
     out->state = static_cast<TxnState>(static_cast<std::uint8_t>(bytes[0]));
     out->commit_ts = lsmkv::DecodeFixed64(bytes.data() + 1);
+    out->writes.clear();
+    if (bytes.size() == 1 + 8) {
+        return STATUS(OK);
+    }
+    lsmkv::Slice input(bytes.data() + 9, bytes.size() - 9);
+    std::uint32_t n = 0;
+    if (!lsmkv::GetFixed32(&input, &n)) {
+        return STATUS(Corruption, "txn meta: bad write count");
+    }
+    out->writes.reserve(n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        lsmkv::Slice table_sl;
+        lsmkv::Slice pk_hex_sl;
+        std::uint64_t vid = 0;
+        if (!lsmkv::GetLengthPrefixedSlice(&input, &table_sl) ||
+            !lsmkv::GetLengthPrefixedSlice(&input, &pk_hex_sl) ||
+            !lsmkv::GetFixed64(&input, &vid)) {
+            return STATUS(Corruption, "txn meta: bad write entry");
+        }
+        TxnWrite w;
+        w.table.assign(table_sl.data(), table_sl.size());
+        RELDB_RETURN_NOT_OK(DecodePkFromKey(std::string(pk_hex_sl.data(), pk_hex_sl.size()), &w.pk));
+        w.version_id = vid;
+        out->writes.push_back(std::move(w));
+    }
+    if (!input.empty()) {
+        return STATUS(Corruption, "txn meta: trailing bytes");
+    }
     return STATUS(OK);
 }
 
@@ -44,10 +85,9 @@ lsmkv::Status Database::Open(const lsmkv::Options& options, const std::string& p
     lsmkv::DB* raw = nullptr;
     RELDB_RETURN_NOT_OK(lsmkv::DB::Open(options, path, &raw));
     auto db = std::unique_ptr<Database>(new Database(std::shared_ptr<lsmkv::DB>(raw)));
-    auto st = db->InitOracles();
-    if (!st.ok()) {
-        return st;
-    }
+    // unique_ptr destroys db if either step fails.
+    RELDB_RETURN_NOT_OK(db->InitOracles());
+    RELDB_RETURN_NOT_OK(db->RecoverTxns());
     *dbptr = std::move(db);
     return STATUS(OK);
 }
@@ -121,8 +161,8 @@ lsmkv::Status Database::Begin(std::unique_ptr<Transaction>* txn) {
     return STATUS(OK);
 }
 
-lsmkv::Status Database::RestoreWrittenHeads(Transaction* txn) {
-    for (auto it = txn->written_.rbegin(); it != txn->written_.rend(); ++it) {
+lsmkv::Status Database::RestoreHeads(const std::vector<TxnWrite>& writes) {
+    for (auto it = writes.rbegin(); it != writes.rend(); ++it) {
         Timestamp head = 0;
         auto st = store_->GetLatestVersionId(it->table, it->pk, &head);
         if (st.IsNotFound()) continue;
@@ -135,6 +175,88 @@ lsmkv::Status Database::RestoreWrittenHeads(Transaction* txn) {
             RELDB_RETURN_NOT_OK(store_->ClearHead(it->table, it->pk));
         } else {
             RELDB_RETURN_NOT_OK(store_->SetHead(it->table, it->pk, rec.prev_id));
+        }
+    }
+    return STATUS(OK);
+}
+
+lsmkv::Status Database::RestoreWrittenHeads(Transaction* txn) {
+    std::vector<TxnWrite> writes;
+    writes.reserve(txn->written_.size());
+    for (const auto& w : txn->written_) {
+        writes.push_back(TxnWrite{w.table, w.pk, w.version_id});
+    }
+    return RestoreHeads(writes);
+}
+
+// Idempotent: stamp provisional versions with commit_ts and close prior live versions.
+lsmkv::Status Database::ApplyCommitWrites(TxnId txn_id, Timestamp commit_ts,
+                                          const std::vector<TxnWrite>& writes) {
+    for (const auto& w : writes) {
+        VersionRecord rec;
+        RELDB_RETURN_NOT_OK(store_->GetVersion(w.table, w.pk, w.version_id, &rec));
+        if (rec.created_by != txn_id) {
+            return STATUS(Corruption, "apply: version owned by other txn");
+        }
+        if (!rec.is_provisional()) {
+            // Already stamped (redo after partial apply).
+            if (rec.start_ts != commit_ts) {
+                return STATUS(Corruption, "apply: version stamped with unexpected ts");
+            }
+            continue;
+        }
+
+        if (rec.prev_id != 0) {
+            VersionRecord prev;
+            auto st = store_->GetVersion(w.table, w.pk, rec.prev_id, &prev);
+            if (st.ok() && !prev.is_provisional() && prev.end_ts == 0) {
+                prev.end_ts = commit_ts;
+                RELDB_RETURN_NOT_OK(store_->PutVersionValue(w.table, w.pk, prev));
+            } else if (st.ok() && !prev.is_provisional() && prev.end_ts == commit_ts) {
+                // already closed by a previous partial apply
+            } else if (!st.ok() && !st.IsNotFound()) {
+                return st;
+            }
+        }
+
+        rec.start_ts = commit_ts;
+        RELDB_RETURN_NOT_OK(store_->PutVersionValue(w.table, w.pk, rec));
+    }
+    return STATUS(OK);
+}
+
+lsmkv::Status Database::RecoverTxns() {
+    // next_txn_id_ is the next free id; live/historical ids are [1, next_txn_id_).
+    for (TxnId id = 1; id < next_txn_id_; ++id) {
+        TxnMeta meta;
+        auto st = GetTxnMeta(id, &meta);
+        if (st.IsNotFound()) continue;
+        RELDB_RETURN_NOT_OK(st);
+
+        if (meta.state == TxnState::kCommitting) {
+            // Redo apply then mark Committed.
+            if (meta.commit_ts == 0) {
+                return STATUS(Corruption, "committing txn missing commit_ts");
+            }
+            RELDB_RETURN_NOT_OK(ApplyCommitWrites(id, meta.commit_ts, meta.writes));
+            TxnMeta done;
+            done.state = TxnState::kCommitted;
+            done.commit_ts = meta.commit_ts;
+            RELDB_RETURN_NOT_OK(PutTxnMeta(id, done));
+            // Advance the oracle past any recovered commit_ts.
+            if (meta.commit_ts >= next_ts_) {
+                next_ts_ = meta.commit_ts + 1;
+                RELDB_RETURN_NOT_OK(PersistOracles());
+            }
+        } else if (meta.state == TxnState::kOpen) {
+            // Crash left an open txn: abort and restore heads when write list known.
+            // Write list is only durable on Committing today; Open meta usually has
+            // empty writes, so restore is a no-op and readers skip Aborted provisionals.
+            RELDB_RETURN_NOT_OK(RestoreHeads(meta.writes));
+            TxnMeta aborted;
+            aborted.state = TxnState::kAborted;
+            aborted.commit_ts = 0;
+            RELDB_RETURN_NOT_OK(PutTxnMeta(id, aborted));
         }
     }
     return STATUS(OK);
@@ -182,29 +304,23 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
     }
 
     const Timestamp commit_ts = next_ts_++;
-
+    std::vector<TxnWrite> writes;
+    writes.reserve(txn->written_.size());
     for (const auto& w : txn->written_) {
-        VersionRecord rec;
-        RELDB_RETURN_NOT_OK(store_->GetVersion(w.table, w.pk, w.version_id, &rec));
-        if (rec.created_by != txn->txn_id_ || !rec.is_provisional()) {
-            return STATUS(Corruption, "commit: unexpected version state");
-        }
-
-        if (rec.prev_id != 0) {
-            VersionRecord prev;
-            auto st = store_->GetVersion(w.table, w.pk, rec.prev_id, &prev);
-            if (st.ok() && !prev.is_provisional() && prev.end_ts == 0) {
-                prev.end_ts = commit_ts;
-                RELDB_RETURN_NOT_OK(store_->PutVersionValue(w.table, w.pk, prev));
-            } else if (!st.ok() && !st.IsNotFound()) {
-                return st;
-            }
-        }
-
-        rec.start_ts = commit_ts;
-        RELDB_RETURN_NOT_OK(store_->PutVersionValue(w.table, w.pk, rec));
+        writes.push_back(TxnWrite{w.table, w.pk, w.version_id});
     }
 
+    // Prepare: durable Committing intent before any version stamps.
+    TxnMeta intent;
+    intent.state = TxnState::kCommitting;
+    intent.commit_ts = commit_ts;
+    intent.writes = writes;
+    RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, intent));
+
+    // Apply (idempotent — RecoverTxns may re-run this).
+    RELDB_RETURN_NOT_OK(ApplyCommitWrites(txn->txn_id_, commit_ts, writes));
+
+    // Finish: never mark Committed while versions still provisional.
     TxnMeta meta;
     meta.state = TxnState::kCommitted;
     meta.commit_ts = commit_ts;

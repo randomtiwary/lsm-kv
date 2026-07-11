@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "lsmkv/common.h"
 #include "lsmkv/db.h"
@@ -17,15 +18,27 @@ using Timestamp = lsmkv::Timestamp;
 using TxnId = lsmkv::Timestamp;
 
 // Transaction registry record (key m/txn/<id>).
+// Commit protocol: Open → Committing (intent + write list) → Committed.
 enum class TxnState : std::uint8_t {
     kOpen = 1,
     kCommitted = 2,
     kAborted = 3,
+    kCommitting = 4,  // durable commit intent; recovery must finish apply
+};
+
+// One key written by a transaction (provisional version to stamp or restore).
+struct TxnWrite {
+    std::string table;
+    Value pk;
+    Timestamp version_id = 0;
 };
 
 struct TxnMeta {
     TxnState state = TxnState::kOpen;
-    Timestamp commit_ts = 0;  // valid when state == kCommitted
+    // Valid when state is kCommitting or kCommitted.
+    Timestamp commit_ts = 0;
+    // Present on kCommitting (required for redo). May be empty for other states.
+    std::vector<TxnWrite> writes;
 };
 
 // One physical version of a row in the MVCC chain (value of v/<table>/<pk>/<version_id>).
