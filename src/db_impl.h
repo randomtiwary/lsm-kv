@@ -32,6 +32,7 @@ public:
     Status Put(const WriteOptions& options, const Slice& key, const Slice& value) override;
     Status Delete(const WriteOptions& options, const Slice& key) override;
     Status Get(const ReadOptions& options, const Slice& key, std::string* value) override;
+    std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
 
 private:
     Status Write(const WriteOptions& options, ValueType type, const Slice& key, const Slice& value);
