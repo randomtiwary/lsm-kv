@@ -186,7 +186,7 @@ TEST(reldb_recovery_committing_partial_apply_idempotent) {
     RemoveDirRecursive(dir);
 }
 
-// Happy path still works with Option A (intent → apply → committed).
+// Happy path: intent → apply → committed still works across reopen.
 TEST(reldb_recovery_normal_commit_still_works) {
     auto dir = MakeTempDir("reldb_rec4");
     {

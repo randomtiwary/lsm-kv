@@ -54,7 +54,7 @@ private:
 
     lsmkv::Status InitOracles();
     lsmkv::Status PersistOracles();
-    // Crash recovery (Option A): finish Committing txns; abort Open txns.
+    // Crash recovery: finish Committing txns; abort Open txns.
     lsmkv::Status RecoverTxns();
     lsmkv::Status CommitTransaction(Transaction* txn);
     lsmkv::Status AbortTransaction(Transaction* txn);

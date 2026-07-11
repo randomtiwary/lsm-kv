@@ -18,7 +18,7 @@ using Timestamp = lsmkv::Timestamp;
 using TxnId = lsmkv::Timestamp;
 
 // Transaction registry record (key m/txn/<id>).
-// Commit uses Option A: Open → Committing (intent + write list) → Committed.
+// Commit protocol: Open → Committing (intent + write list) → Committed.
 enum class TxnState : std::uint8_t {
     kOpen = 1,
     kCommitted = 2,

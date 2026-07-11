@@ -239,7 +239,7 @@ lsmkv::Status Database::RecoverTxns() {
         RELDB_RETURN_NOT_OK(st);
 
         if (meta.state == TxnState::kCommitting) {
-            // Redo apply then mark Committed (Option A).
+            // Redo apply then mark Committed.
             if (meta.commit_ts == 0) {
                 return STATUS(Corruption, "committing txn missing commit_ts");
             }
@@ -315,7 +315,7 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
         writes.push_back(TxnWrite{w.table, w.pk, w.version_id});
     }
 
-    // Option A prepare: durable Committing intent before any version stamps.
+    // Prepare: durable Committing intent before any version stamps.
     TxnMeta intent;
     intent.state = TxnState::kCommitting;
     intent.commit_ts = commit_ts;
