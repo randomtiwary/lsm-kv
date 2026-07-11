@@ -22,8 +22,8 @@ std::string PkHexFromHeadKey(const lsmkv::Slice& key, const std::string& prefix)
 
 }  // namespace
 
-Transaction::Transaction(Database* db, TxnId txn_id, Timestamp start_ts)
-    : db_(db), txn_id_(txn_id), start_ts_(start_ts) {}
+Transaction::Transaction(std::shared_ptr<Database> db, TxnId txn_id, Timestamp start_ts)
+    : db_(std::move(db)), txn_id_(txn_id), start_ts_(start_ts) {}
 
 Transaction::~Transaction() {
     if (!finished_) Abort();
@@ -200,10 +200,10 @@ lsmkv::Status Transaction::Get(const std::string& table, const Value& pk, Row* o
         [this](TxnId id, TxnMeta* m) { return db_->GetTxnMeta(id, m); }, out);
 }
 
-RowScan::RowScan(Database* db, TxnId txn_id, Timestamp start_ts, std::string table,
-                 std::string prefix, std::string end_key, bool has_end,
-                 std::unique_ptr<lsmkv::Iterator> it)
-    : db_(db),
+TableRowScan::TableRowScan(std::shared_ptr<Database> db, TxnId txn_id, Timestamp start_ts,
+                           std::string table, std::string prefix, std::string end_key,
+                           bool has_end, std::unique_ptr<lsmkv::Iterator> it)
+    : db_(std::move(db)),
       txn_id_(txn_id),
       start_ts_(start_ts),
       table_(std::move(table)),
@@ -214,15 +214,15 @@ RowScan::RowScan(Database* db, TxnId txn_id, Timestamp start_ts, std::string tab
     Advance();
 }
 
-RowScan::~RowScan() = default;
+TableRowScan::~TableRowScan() = default;
 
-void RowScan::Next() {
+void TableRowScan::Next() {
     if (!valid_) return;
     it_->Next();
     Advance();
 }
 
-void RowScan::Advance() {
+void TableRowScan::Advance() {
     valid_ = false;
     pk_ = Value();
     row_ = Row();
@@ -268,7 +268,7 @@ void RowScan::Advance() {
 }
 
 lsmkv::Status Transaction::Scan(const std::string& table, const Value* start_pk,
-                                const Value* end_pk, std::unique_ptr<RowScan>* out) {
+                                const Value* end_pk, std::unique_ptr<TableRowScan>* out) {
     if (finished_) return STATUS(InvalidArgument, "transaction finished");
     if (out == nullptr) return STATUS(InvalidArgument, "null out");
     if (out->get() != nullptr) {
@@ -291,8 +291,9 @@ lsmkv::Status Transaction::Scan(const std::string& table, const Value* start_pk,
     auto it = db_->kv()->NewIterator(lsmkv::ReadOptions());
     it->Seek(seek_target);
 
-    *out = std::unique_ptr<RowScan>(new RowScan(db_, txn_id_, start_ts_, table, prefix,
-                                                std::move(end_key), has_end, std::move(it)));
+    *out = std::unique_ptr<TableRowScan>(
+        new TableRowScan(db_, txn_id_, start_ts_, table, prefix, std::move(end_key), has_end,
+                         std::move(it)));
     if (!(*out)->status().ok()) {
         return (*out)->status();
     }
@@ -307,6 +308,11 @@ lsmkv::Status Transaction::Commit() {
 lsmkv::Status Transaction::Abort() {
     if (finished_) return STATUS(OK);
     return db_->AbortTransaction(this);
+}
+
+void Transaction::AbandonWithoutAbort() {
+    finished_ = true;
+    db_.reset();
 }
 
 }  // namespace reldb

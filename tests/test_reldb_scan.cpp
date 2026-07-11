@@ -24,10 +24,10 @@ reldb::Row User(std::int64_t id, const std::string& name) {
     return reldb::Row({reldb::Value::Int64(id), reldb::Value::String(name)});
 }
 
-std::unique_ptr<reldb::Database> OpenDb(const std::string& dir) {
+std::shared_ptr<reldb::Database> OpenDb(const std::string& dir) {
     lsmkv::Options opt;
     opt.create_if_missing = true;
-    std::unique_ptr<reldb::Database> db;
+    std::shared_ptr<reldb::Database> db;
     if (!reldb::Database::Open(opt, dir, &db).ok()) return nullptr;
     return db;
 }
@@ -42,7 +42,7 @@ TEST(reldb_scan_empty_table) {
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "begin");
-        std::unique_ptr<reldb::RowScan> scan;
+        std::unique_ptr<reldb::TableRowScan> scan;
         EXPECT_OK(txn->Scan("users", nullptr, nullptr, &scan), "scan");
         expect(!scan->Valid(), "empty");
         EXPECT_OK(scan->status(), "status");
@@ -68,7 +68,7 @@ TEST(reldb_scan_full_table_order) {
         {
             std::unique_ptr<reldb::Transaction> txn;
             EXPECT_OK(db->Begin(&txn), "begin2");
-            std::unique_ptr<reldb::RowScan> scan;
+            std::unique_ptr<reldb::TableRowScan> scan;
             EXPECT_OK(txn->Scan("users", nullptr, nullptr, &scan), "scan");
             std::vector<std::int64_t> ids;
             for (; scan->Valid(); scan->Next()) {
@@ -105,7 +105,7 @@ TEST(reldb_scan_bounds_inclusive_start_exclusive_end) {
             EXPECT_OK(db->Begin(&txn), "begin2");
             const reldb::Value start = reldb::Value::Int64(2);
             const reldb::Value end = reldb::Value::Int64(5);  // exclusive
-            std::unique_ptr<reldb::RowScan> scan;
+            std::unique_ptr<reldb::TableRowScan> scan;
             EXPECT_OK(txn->Scan("users", &start, &end, &scan), "scan");
             std::vector<std::int64_t> ids;
             for (; scan->Valid(); scan->Next()) {
@@ -140,7 +140,7 @@ TEST(reldb_scan_read_your_writes_and_skip_deleted) {
             EXPECT_OK(txn->Delete("users", reldb::Value::Int64(1)), "del 1");
             std::vector<std::int64_t> ids;
             {
-                std::unique_ptr<reldb::RowScan> scan;
+                std::unique_ptr<reldb::TableRowScan> scan;
                 EXPECT_OK(txn->Scan("users", nullptr, nullptr, &scan), "scan");
                 for (; scan->Valid(); scan->Next()) {
                     ids.push_back(scan->pk().GetInt64());
@@ -181,7 +181,7 @@ TEST(reldb_scan_snapshot_isolation) {
         std::vector<std::int64_t> ids;
         std::string name1;
         {
-            std::unique_ptr<reldb::RowScan> scan;
+            std::unique_ptr<reldb::TableRowScan> scan;
             EXPECT_OK(t1->Scan("users", nullptr, nullptr, &scan), "scan");
             for (; scan->Valid(); scan->Next()) {
                 ids.push_back(scan->pk().GetInt64());
@@ -209,13 +209,13 @@ TEST(reldb_scan_rejects_finished_and_nonempty_out) {
             std::unique_ptr<reldb::Transaction> txn;
             EXPECT_OK(db->Begin(&txn), "begin");
             EXPECT_OK(txn->Commit(), "commit");
-            std::unique_ptr<reldb::RowScan> scan;
+            std::unique_ptr<reldb::TableRowScan> scan;
             expect(txn->Scan("users", nullptr, nullptr, &scan).IsInvalidArgument(), "finished");
         }
         {
             std::unique_ptr<reldb::Transaction> txn;
             EXPECT_OK(db->Begin(&txn), "begin2");
-            std::unique_ptr<reldb::RowScan> scan;
+            std::unique_ptr<reldb::TableRowScan> scan;
             EXPECT_OK(txn->Scan("users", nullptr, nullptr, &scan), "scan1");
             expect(txn->Scan("users", nullptr, nullptr, &scan).IsInvalidArgument(), "nonempty out");
         }

@@ -78,14 +78,13 @@ Database::Database(std::shared_ptr<lsmkv::DB> kv)
 Database::~Database() = default;
 
 lsmkv::Status Database::Open(const lsmkv::Options& options, const std::string& path,
-                             std::unique_ptr<Database>* dbptr) {
+                             std::shared_ptr<Database>* dbptr) {
     if (dbptr == nullptr) {
         return STATUS(InvalidArgument, "null dbptr");
     }
     lsmkv::DB* raw = nullptr;
     RELDB_RETURN_NOT_OK(lsmkv::DB::Open(options, path, &raw));
-    auto db = std::unique_ptr<Database>(new Database(std::shared_ptr<lsmkv::DB>(raw)));
-    // unique_ptr destroys db if either step fails.
+    auto db = std::shared_ptr<Database>(new Database(std::shared_ptr<lsmkv::DB>(raw)));
     RELDB_RETURN_NOT_OK(db->InitOracles());
     RELDB_RETURN_NOT_OK(db->RecoverTxns());
     *dbptr = std::move(db);
@@ -157,7 +156,8 @@ lsmkv::Status Database::Begin(std::unique_ptr<Transaction>* txn) {
     meta.state = TxnState::kOpen;
     meta.commit_ts = 0;
     RELDB_RETURN_NOT_OK(PutTxnMeta(id, meta));
-    *txn = std::unique_ptr<Transaction>(new Transaction(this, id, start_ts));
+    *txn = std::unique_ptr<Transaction>(
+        new Transaction(shared_from_this(), id, start_ts));
     return STATUS(OK);
 }
 

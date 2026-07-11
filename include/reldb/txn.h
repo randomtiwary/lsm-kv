@@ -18,17 +18,18 @@ using Timestamp = lsmkv::Timestamp;
 class Database;
 
 // Cursor over rows of one table visible to a transaction (SI snapshot).
-// Owned by the caller via unique_ptr.
+// Owned by the caller via unique_ptr. Holds shared_ptr<Database> so the DB
+// outlives the scan even if the caller's Database handle is released.
 //
 // Destroy the scan before Commit/Abort/further writes on the same transaction:
 // the underlying DB iterator may hold shared locks that block writers.
 // Not valid after the Transaction finishes.
-class RowScan {
+class TableRowScan {
 public:
-    ~RowScan();
+    ~TableRowScan();
 
-    RowScan(const RowScan&) = delete;
-    RowScan& operator=(const RowScan&) = delete;
+    TableRowScan(const TableRowScan&) = delete;
+    TableRowScan& operator=(const TableRowScan&) = delete;
 
     bool Valid() const { return valid_; }
     void Next();
@@ -39,14 +40,14 @@ public:
 private:
     friend class Transaction;
 
-    RowScan(Database* db, TxnId txn_id, Timestamp start_ts, std::string table,
-            std::string prefix, std::string end_key, bool has_end,
-            std::unique_ptr<lsmkv::Iterator> it);
+    TableRowScan(std::shared_ptr<Database> db, TxnId txn_id, Timestamp start_ts,
+                 std::string table, std::string prefix, std::string end_key, bool has_end,
+                 std::unique_ptr<lsmkv::Iterator> it);
 
     // Advance KV iterator to the next head key in range with a visible live row.
     void Advance();
 
-    Database* db_;
+    std::shared_ptr<Database> db_;
     TxnId txn_id_;
     Timestamp start_ts_;
     std::string table_;
@@ -90,14 +91,18 @@ public:
     // start_pk inclusive when non-null; end_pk exclusive when non-null.
     // Both null: full table. Caller owns *out.
     lsmkv::Status Scan(const std::string& table, const Value* start_pk, const Value* end_pk,
-                       std::unique_ptr<RowScan>* out);
+                       std::unique_ptr<TableRowScan>* out);
 
     lsmkv::Status Commit();
     lsmkv::Status Abort();
 
+    // Crash-recovery tests only: mark finished and drop the Database reference
+    // without Abort/Commit (simulates process death leaving Open provisionals).
+    void AbandonWithoutAbort();
+
 private:
     friend class Database;
-    friend class RowScan;
+    friend class TableRowScan;
 
     struct WrittenKey {
         std::string table;
@@ -105,12 +110,12 @@ private:
         Timestamp version_id;
     };
 
-    Transaction(Database* db, TxnId txn_id, Timestamp start_ts);
+    Transaction(std::shared_ptr<Database> db, TxnId txn_id, Timestamp start_ts);
 
     lsmkv::Status Write(const std::string& table, const Value& pk, bool is_delete,
                         const Row* row, bool is_insert);
 
-    Database* db_;
+    std::shared_ptr<Database> db_;
     TxnId txn_id_;
     Timestamp start_ts_;
     bool finished_ = false;

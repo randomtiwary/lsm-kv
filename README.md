@@ -145,7 +145,7 @@ change LSM internals.
 #include "reldb/database.h"
 #include "reldb/txn.h"
 
-std::unique_ptr<reldb::Database> db;
+std::shared_ptr<reldb::Database> db;
 reldb::Database::Open(options, "/tmp/reldb", &db);
 db->CreateTable(schema);
 

@@ -20,11 +20,12 @@ class Transaction;
 
 // Relational database with MVCC + snapshot isolation.
 // Owns an underlying lsmkv::DB via shared_ptr (shared with Catalog and MvccStore).
-// Callers own Database / Transaction via unique_ptr (no manual delete).
-class Database {
+// Database is held as shared_ptr so Transaction / TableRowScan can share it safely.
+// Transactions are still unique_ptr (single owner).
+class Database : public std::enable_shared_from_this<Database> {
 public:
     static lsmkv::Status Open(const lsmkv::Options& options, const std::string& path,
-                              std::unique_ptr<Database>* dbptr);
+                              std::shared_ptr<Database>* dbptr);
 
     ~Database();
 
@@ -38,6 +39,7 @@ public:
     // Allocates a Transaction with a fresh txn_id and start_ts = last commit.
     // *txn must be empty (get() == nullptr); otherwise InvalidArgument.
     // Caller owns the unique_ptr; Commit() or Abort() before destroy (dtor aborts).
+    // Transaction holds a shared_ptr to this Database.
     lsmkv::Status Begin(std::unique_ptr<Transaction>* txn);
 
     std::shared_ptr<Catalog> catalog() const { return catalog_; }
@@ -49,7 +51,7 @@ public:
 
 private:
     friend class Transaction;
-    friend class RowScan;
+    friend class TableRowScan;
 
     explicit Database(std::shared_ptr<lsmkv::DB> kv);
 

@@ -23,19 +23,20 @@ reldb::Row User(std::int64_t id, const std::string& name) {
     return reldb::Row({reldb::Value::Int64(id), reldb::Value::String(name)});
 }
 
-std::unique_ptr<reldb::Database> OpenDb(const std::string& dir) {
+std::shared_ptr<reldb::Database> OpenDb(const std::string& dir) {
     lsmkv::Options opt;
     opt.create_if_missing = true;
-    std::unique_ptr<reldb::Database> db;
+    std::shared_ptr<reldb::Database> db;
     if (!reldb::Database::Open(opt, dir, &db).ok()) return nullptr;
     return db;
 }
 
-// Simulate process crash: forget the in-memory Transaction without Abort/Commit,
-// then drop the Database. Uses release() intentionally (no RAII cleanup).
+// Simulate process crash: leave durable Open/Committing state on disk, destroy
+// in-memory handles without Abort/Commit.
 void SimulateCrashDrop(std::unique_ptr<reldb::Transaction>& txn,
-                       std::unique_ptr<reldb::Database>& db) {
-    (void)txn.release();  // leak: crash would not run ~Transaction
+                       std::shared_ptr<reldb::Database>& db) {
+    txn->AbandonWithoutAbort();  // drop shared Database ref without Abort
+    txn.reset();
     db.reset();
 }
 
@@ -46,7 +47,7 @@ TEST(reldb_recovery_open_txn_aborted_on_reopen) {
     auto dir = MakeTempDir("reldb_rec1");
     reldb::TxnId id = 0;
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -58,7 +59,7 @@ TEST(reldb_recovery_open_txn_aborted_on_reopen) {
     }
 
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "reopen");
 
         reldb::TxnMeta meta;
@@ -81,7 +82,7 @@ TEST(reldb_recovery_committing_intent_redo) {
     reldb::TxnId id = 0;
     reldb::TxnWrite written;
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -105,7 +106,7 @@ TEST(reldb_recovery_committing_intent_redo) {
     }
 
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "reopen");
 
         reldb::TxnMeta meta;
@@ -135,7 +136,7 @@ TEST(reldb_recovery_committing_partial_apply_idempotent) {
     auto dir = MakeTempDir("reldb_rec3");
     reldb::TxnId id = 0;
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -167,7 +168,7 @@ TEST(reldb_recovery_committing_partial_apply_idempotent) {
     }
 
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "reopen");
 
         reldb::TxnMeta meta;
@@ -190,7 +191,7 @@ TEST(reldb_recovery_committing_partial_apply_idempotent) {
 TEST(reldb_recovery_normal_commit_still_works) {
     auto dir = MakeTempDir("reldb_rec4");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -200,7 +201,7 @@ TEST(reldb_recovery_normal_commit_still_works) {
         EXPECT_OK(txn->Commit(), "commit");
     }
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "reopen");
         std::unique_ptr<reldb::Transaction> check;
         EXPECT_OK(db->Begin(&check), "begin");
