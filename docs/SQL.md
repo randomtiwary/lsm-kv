@@ -149,7 +149,7 @@ class SqlSession {
 | `COMMIT` | If no txn → error. Else `Commit()`, release txn. |
 | `ABORT` / `ROLLBACK` | If no txn → error. Else `Abort()`, release txn. |
 | DML / `SELECT` | If no open txn → **auto-txn**: begin, run, commit (or abort on error). If open txn → run inside it. |
-| `CREATE TABLE` | **Outside** user txn semantics: always applies immediately via `Database::CreateTable`. Error if currently inside a SQL txn (simplest, educational). |
+| `CREATE TABLE` | See **DDL is forbidden inside a transaction** below. |
 
 **Autocommit for single statements** avoids forcing `BEGIN` for every demo, while
 `BEGIN`…`COMMIT` enables multi-statement SI snapshots.
@@ -163,6 +163,36 @@ COMMIT;
 
 Conflict on `COMMIT` → surface `Status::Conflict`; session txn is finished (same as
 C++ API after failed commit).
+
+### DDL is forbidden inside a transaction
+
+DDL (`CREATE TABLE` today; any later DDL) is **non-transactional** in reldb: it applies
+immediately and is **not** rolled back by `ABORT`. Allowing it inside `BEGIN`…`COMMIT`
+would be misleading (looks transactional, is not).
+
+**Rule (v1, locked):**
+
+- If `SqlSession` currently has an open transaction (`InTransaction() == true`), any
+  DDL statement must fail with a clear `InvalidArgument` (or similar) **before**
+  mutating the catalog.
+- DDL is only allowed when the session is **not** in a transaction.
+- Outside a txn, `CREATE TABLE` still goes through `Database::CreateTable` (immediate).
+
+```text
+BEGIN;
+CREATE TABLE t(...);   -- ERROR: DDL not allowed inside a transaction
+ABORT;
+
+CREATE TABLE t(...);   -- OK (no open txn)
+BEGIN;
+INSERT INTO t ...;
+COMMIT;
+```
+
+**Implementation timing:** enforce in `SqlSession::Execute` when the statement is DDL
+(PR **06** session work, or a small follow-up PR right after 06 if session lands
+without it). Parser may still accept `CREATE TABLE` text; the **session gate** is the
+source of truth. Unit test: `BEGIN` then `CREATE TABLE` → error; catalog unchanged.
 
 ## SQL dialect (v1)
 
@@ -299,6 +329,7 @@ Do not require both to interleave on the same session object in v1 (document if
 | Bind + optimizer | `WHERE id = 1` → point; residual → scan+filter (`EXPLAIN`) |
 | SQL e2e | BEGIN/INSERT/SELECT/COMMIT; autocommit SELECT; conflict on commit |
 | Session | Double BEGIN errors; COMMIT without BEGIN errors |
+| DDL vs txn | `BEGIN` + `CREATE TABLE` → error, catalog unchanged; DDL OK with no open txn |
 
 ## PR plan (all target `feature/sql-layer`)
 
@@ -311,7 +342,11 @@ Do not require both to interleave on the same session object in v1 (document if
 | **04** | Physical executors | Operators + hand-built plan tests |
 | **05** | Lexer + parser | SQL text → AST + tests |
 | **06** | Binder + optimizer + `SqlSession` | Bind, rules, `Execute`, BEGIN/COMMIT/ABORT, e2e SQL |
+| **06b** (optional split) | Block DDL in open txn | Session rejects `CREATE TABLE` (etc.) when `InTransaction()`; tests |
 | **07** | Example + README | `reldb_sql_example`, user-facing docs |
+
+PR **06b** may be folded into **06** if small; either way the gate is required before
+calling the feature branch “SQL-complete.”
 
 Dependency chain:
 
@@ -329,7 +364,7 @@ Dependency chain:
 |-------|---------|
 | SQL `BEGIN`/`COMMIT`/`ABORT` | **In v1** (this doc) |
 | Autocommit when no txn | **Yes** for DML/SELECT |
-| `CREATE TABLE` inside open SQL txn | **Error** (DDL non-transactional) |
+| `CREATE TABLE` / DDL inside open SQL txn | **Hard error** (DDL non-transactional; see section above) |
 | `ORDER BY` | In-memory sort only |
 | Parser | Hand-written recursive descent |
 | Optimizer | Rule-based only; optional `EXPLAIN` |

@@ -25,13 +25,14 @@ teach *why* SI works the way it does (including what it does **not** prevent).
 - Durable state via the underlying LSM (WAL + SSTables)
 - Exhaustive unit tests per component and multi-threaded SI tests
 
-## Non-Goals (v1)
+## Non-Goals (core SI stack)
 
-- Full SQL parser / planner / optimizer
 - Secondary indexes, foreign keys, joins
 - Serializable isolation (SSI / true serializability)
-- Range scans / multi-row queries / table iterators (point lookups by PK only; needs KV iterators later)
 - Distributed transactions, 2PC, replication
+
+SQL, range scans, and a basic optimizer are **out of this document’s core stack** but
+planned on branch `feature/sql-layer` — see [SQL.md](SQL.md).
 
 ## Layering
 
@@ -149,10 +150,8 @@ detection. Only DML via `Transaction` is snapshot-isolated.
 ### Point reads vs multi-row queries
 
 `Transaction::Get` is a **primary-key point lookup** returning at most one row.
-Multi-row results (filters, full table scans, joins) are non-goals until the
-underlying KV exposes iterators and we add an explicit scan/query API. That does
-not preclude a multi-row API later; it keeps v1 focused on correct SI for
-single-key access.
+Table/range **scan** and SQL are designed in [SQL.md](SQL.md) (KV iterator →
+`Transaction::Scan` → SQL).
 
 ## Public API (sketch)
 
@@ -202,7 +201,8 @@ Commits are serialized for simplicity (educational correctness over throughput).
 ## PR Plan
 
 Core stack (PRs 12–16) was developed on `feature/relational-db` and merged to `main`.
-SI concurrency tests are on `main`; Option A recovery follows as a normal PR to `main`.
+SI concurrency tests and crash-safe commit recovery are on `main`.
+SQL / scan work continues on `feature/sql-layer` — see [SQL.md](SQL.md).
 
 ### PR 12: Design + library scaffold
 - **Files:** `docs/RELATIONAL.md`, `docs/DESIGN.md` (pointer), CMake `src/reldb/`,
