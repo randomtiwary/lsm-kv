@@ -12,35 +12,52 @@
 
 namespace reldb {
 
+// Comparison operators used by Compare nodes.
 enum class CmpOp : std::uint8_t {
-    kEq = 0,
-    kNe,
-    kLt,
-    kLe,
-    kGt,
-    kGe,
+    kEq = 0,  // `=`
+    kNe,      // `!=` / `<>`
+    kLt,      // `<`
+    kLe,      // `<=`
+    kGt,      // `>`
+    kGe,      // `>=`
 };
 
+// Boolean connectives used by Logic nodes.
 enum class LogicOp : std::uint8_t {
-    kAnd = 0,
-    kOr,
-    kNot,
+    kAnd = 0,  // `AND` (binary)
+    kOr,       // `OR` (binary)
+    kNot,      // `NOT` (unary; child in left_)
 };
 
 // Expression tree for filters/projections (bound against a TableSchema).
 // Owned via unique_ptr; leaves are literals or column references.
+//
+// Lifecycle (Bind → Eval):
+//   1. Build the tree with factory helpers (Literal / Column / Compare / And / Or / Not).
+//      Column nodes store a name only; column_index_ is -1 (unbound).
+//   2. Call Bind(schema) once (or after the schema is known). This walks the tree and
+//      sets column_index_ for every Column leaf via TableSchema::ColumnIndex. Missing
+//      names return InvalidArgument. Bind is idempotent.
+//   3. Call Eval(row, schema, &value) on any row that matches that schema width:
+//        - Literal → copies the stored Value
+//        - Column  → row.at(column_index_) (falls back to name lookup if still unbound)
+//        - Compare → eval children, then type-checked comparison (NULL if either side NULL)
+//        - Logic   → three-valued AND/OR/NOT (NULL propagates per SQL-style rules)
+//   4. For WHERE-style use, call EvalBool: runs Eval, then maps NULL and non-Bool to false.
+//
+// Typical path: Bind once on a planned filter, then EvalBool per scanned row.
 class Expr {
 public:
+    // Node shape in the expression tree.
     enum class Kind : std::uint8_t {
-        kLiteral = 0,
-        kColumn,
-        kCompare,
-        kLogic,
+        kLiteral = 0,  // constant Value
+        kColumn,       // column reference (name / bound index)
+        kCompare,      // left CmpOp right
+        kLogic,        // AND / OR / NOT over child expr(s)
     };
 
     static std::unique_ptr<Expr> Literal(Value v);
-    // Unbound column name; call Bind() before Eval (or Eval binds by name each time
-    // if index is still -1).
+    // Unbound column name; call Bind() before Eval for the fast path.
     static std::unique_ptr<Expr> Column(std::string name);
     static std::unique_ptr<Expr> Compare(CmpOp op, std::unique_ptr<Expr> left,
                                         std::unique_ptr<Expr> right);
