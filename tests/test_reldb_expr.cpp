@@ -98,7 +98,7 @@ TEST(reldb_expr_logic_and_null) {
     EXPECT_OK(not_active->EvalBool(row, schema, &b), "not");
     expect(!b, "not true");
 
-    // NULL compare → NULL → EvalBool false
+    // NULL compare → NULL → EvalBool false (filter out)
     auto null_cmp = reldb::Expr::Compare(
         reldb::CmpOp::kEq, reldb::Expr::Literal(reldb::Value::Null()),
         reldb::Expr::Literal(reldb::Value::Int64(1)));
@@ -108,6 +108,11 @@ TEST(reldb_expr_logic_and_null) {
     expect(v.IsNull(), "null result");
     EXPECT_OK(null_cmp->EvalBool(row, schema, &b), "bool null");
     expect(!b, "where null is false");
+
+    // Bare non-bool column as predicate is a query error.
+    auto bare_id = reldb::Expr::Column("id");
+    EXPECT_OK(bare_id->Bind(schema), "bind id");
+    expect(bare_id->EvalBool(row, schema, &b).IsInvalidArgument(), "non-bool predicate");
 
     // true OR NULL → true; false AND NULL → false
     auto or_null = reldb::Expr::Or(

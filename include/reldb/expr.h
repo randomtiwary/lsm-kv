@@ -43,7 +43,8 @@ enum class LogicOp : std::uint8_t {
 //        - Column  → row.at(column_index_) (falls back to name lookup if still unbound)
 //        - Compare → eval children, then type-checked comparison (NULL if either side NULL)
 //        - Logic   → three-valued AND/OR/NOT (NULL propagates per SQL-style rules)
-//   4. For WHERE-style use, call EvalBool: runs Eval, then maps NULL and non-Bool to false.
+//   4. For WHERE-style use, call EvalBool: runs Eval; NULL → false (row filtered out);
+//      non-Bool → InvalidArgument (bad predicate, e.g. bare column of type INT).
 //
 // Typical path: Bind once on a planned filter, then EvalBool per scanned row.
 class Expr {
@@ -73,7 +74,7 @@ public:
     // Evaluate to a Value (including Bool for predicates, Null for unknown).
     lsmkv::Status Eval(const Row& row, const TableSchema& schema, Value* out) const;
 
-    // For WHERE: Null and non-Bool results are treated as false.
+    // For WHERE: Null → false; non-Bool → InvalidArgument.
     lsmkv::Status EvalBool(const Row& row, const TableSchema& schema, bool* out) const;
 
 private:

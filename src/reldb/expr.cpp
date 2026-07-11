@@ -78,7 +78,7 @@ lsmkv::Status Expr::Bind(const TableSchema& schema) {
             }
             return STATUS(OK);
     }
-    return STATUS(Corruption, "unknown expr kind");
+    return STATUS(InvalidArgument, "unknown expr kind");
 }
 
 lsmkv::Status Expr::Eval(const Row& row, const TableSchema& schema, Value* out) const {
@@ -106,17 +106,21 @@ lsmkv::Status Expr::Eval(const Row& row, const TableSchema& schema, Value* out) 
         case Kind::kLogic:
             return EvalLogic(row, schema, out);
     }
-    return STATUS(Corruption, "unknown expr kind");
+    return STATUS(InvalidArgument, "unknown expr kind");
 }
 
 lsmkv::Status Expr::EvalBool(const Row& row, const TableSchema& schema, bool* out) const {
     if (out == nullptr) return STATUS(InvalidArgument, "null out");
     Value v;
     RELDB_RETURN_NOT_OK(Eval(row, schema, &v));
-    // WHERE semantics: NULL / non-bool → false
-    if (v.IsNull() || v.type() != ColumnType::kBool) {
+    // WHERE: SQL unknown (NULL) filters out the row.
+    if (v.IsNull()) {
         *out = false;
         return STATUS(OK);
+    }
+    // Non-boolean predicates are a query error (e.g. WHERE id with no compare).
+    if (v.type() != ColumnType::kBool) {
+        return STATUS(InvalidArgument, "predicate must be boolean");
     }
     *out = v.GetBool();
     return STATUS(OK);
