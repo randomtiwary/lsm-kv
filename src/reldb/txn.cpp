@@ -1,10 +1,26 @@
 #include "reldb/txn.h"
 
+#include <cstring>
+
 #include "reldb/database.h"
 #include "reldb/macros.h"
 #include "reldb/schema.h"
 
 namespace reldb {
+namespace {
+
+bool HasPrefix(const lsmkv::Slice& key, const std::string& prefix) {
+    return key.size() >= prefix.size() &&
+           std::memcmp(key.data(), prefix.data(), prefix.size()) == 0;
+}
+
+// Head key is "d/<table>/<pk_hex>"; return pk_hex suffix or empty if malformed.
+std::string PkHexFromHeadKey(const lsmkv::Slice& key, const std::string& prefix) {
+    if (!HasPrefix(key, prefix)) return {};
+    return std::string(key.data() + prefix.size(), key.size() - prefix.size());
+}
+
+}  // namespace
 
 Transaction::Transaction(Database* db, TxnId txn_id, Timestamp start_ts)
     : db_(db), txn_id_(txn_id), start_ts_(start_ts) {}
@@ -182,6 +198,105 @@ lsmkv::Status Transaction::Get(const std::string& table, const Value& pk, Row* o
     return db_->store_->GetRow(
         table, pk, start_ts_, txn_id_,
         [this](TxnId id, TxnMeta* m) { return db_->GetTxnMeta(id, m); }, out);
+}
+
+RowScan::RowScan(Database* db, TxnId txn_id, Timestamp start_ts, std::string table,
+                 std::string prefix, std::string end_key, bool has_end,
+                 std::unique_ptr<lsmkv::Iterator> it)
+    : db_(db),
+      txn_id_(txn_id),
+      start_ts_(start_ts),
+      table_(std::move(table)),
+      prefix_(std::move(prefix)),
+      end_key_(std::move(end_key)),
+      has_end_(has_end),
+      it_(std::move(it)) {
+    Advance();
+}
+
+RowScan::~RowScan() = default;
+
+void RowScan::Next() {
+    if (!valid_) return;
+    it_->Next();
+    Advance();
+}
+
+void RowScan::Advance() {
+    valid_ = false;
+    pk_ = Value();
+    row_ = Row();
+    if (!status_.ok()) return;
+
+    while (it_->Valid()) {
+        status_ = it_->status();
+        if (!status_.ok()) return;
+
+        const lsmkv::Slice key = it_->key();
+        if (!HasPrefix(key, prefix_)) {
+            return;  // left the table prefix
+        }
+        if (has_end_ && key.compare(lsmkv::Slice(end_key_)) >= 0) {
+            return;  // exclusive end bound
+        }
+
+        const std::string pk_hex = PkHexFromHeadKey(key, prefix_);
+        Value pk;
+        status_ = DecodePkFromKey(pk_hex, &pk);
+        if (!status_.ok()) return;
+
+        Row row;
+        {
+            std::lock_guard<std::mutex> lock(db_->mu_);
+            status_ = db_->store_->GetRow(
+                table_, pk, start_ts_, txn_id_,
+                [this](TxnId id, TxnMeta* m) { return db_->GetTxnMeta(id, m); }, &row);
+        }
+        if (status_.IsNotFound()) {
+            status_ = STATUS(OK);
+            it_->Next();
+            continue;  // no live version at this snapshot
+        }
+        if (!status_.ok()) return;
+
+        pk_ = std::move(pk);
+        row_ = std::move(row);
+        valid_ = true;
+        return;
+    }
+    status_ = it_->status();
+}
+
+lsmkv::Status Transaction::Scan(const std::string& table, const Value* start_pk,
+                                const Value* end_pk, std::unique_ptr<RowScan>* out) {
+    if (finished_) return STATUS(InvalidArgument, "transaction finished");
+    if (out == nullptr) return STATUS(InvalidArgument, "null out");
+    if (out->get() != nullptr) {
+        return STATUS(InvalidArgument, "out already holds a scan");
+    }
+    TableSchema schema;
+    RELDB_RETURN_NOT_OK(db_->catalog()->GetTable(table, &schema));
+
+    const std::string prefix = "d/" + table + "/";
+    std::string seek_target = prefix;
+    if (start_pk != nullptr) {
+        seek_target = RowHeadKey(table, EncodePkForKey(*start_pk));
+    }
+    std::string end_key;
+    const bool has_end = (end_pk != nullptr);
+    if (has_end) {
+        end_key = RowHeadKey(table, EncodePkForKey(*end_pk));
+    }
+
+    auto it = db_->kv()->NewIterator(lsmkv::ReadOptions());
+    it->Seek(seek_target);
+
+    *out = std::unique_ptr<RowScan>(new RowScan(db_, txn_id_, start_ts_, table, prefix,
+                                                std::move(end_key), has_end, std::move(it)));
+    if (!(*out)->status().ok()) {
+        return (*out)->status();
+    }
+    return STATUS(OK);
 }
 
 lsmkv::Status Transaction::Commit() {

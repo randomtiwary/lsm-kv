@@ -49,6 +49,7 @@ public:
 
 private:
     friend class Transaction;
+    friend class RowScan;
 
     explicit Database(std::shared_ptr<lsmkv::DB> kv);
 

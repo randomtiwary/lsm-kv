@@ -1,9 +1,11 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "lsmkv/common.h"
+#include "lsmkv/db.h"
 #include "lsmkv/status.h"
 #include "reldb/mvcc.h"
 #include "reldb/row.h"
@@ -14,6 +16,49 @@ namespace reldb {
 using Timestamp = lsmkv::Timestamp;
 
 class Database;
+
+// Cursor over rows of one table visible to a transaction (SI snapshot).
+// Owned by the caller via unique_ptr.
+//
+// Destroy the scan before Commit/Abort/further writes on the same transaction:
+// the underlying DB iterator may hold shared locks that block writers.
+// Not valid after the Transaction finishes.
+class RowScan {
+public:
+    ~RowScan();
+
+    RowScan(const RowScan&) = delete;
+    RowScan& operator=(const RowScan&) = delete;
+
+    bool Valid() const { return valid_; }
+    void Next();
+    const Value& pk() const { return pk_; }
+    const Row& row() const { return row_; }
+    lsmkv::Status status() const { return status_; }
+
+private:
+    friend class Transaction;
+
+    RowScan(Database* db, TxnId txn_id, Timestamp start_ts, std::string table,
+            std::string prefix, std::string end_key, bool has_end,
+            std::unique_ptr<lsmkv::Iterator> it);
+
+    // Advance KV iterator to the next head key in range with a visible live row.
+    void Advance();
+
+    Database* db_;
+    TxnId txn_id_;
+    Timestamp start_ts_;
+    std::string table_;
+    std::string prefix_;   // "d/<table>/"
+    std::string end_key_;  // exclusive upper bound when has_end_
+    bool has_end_ = false;
+    std::unique_ptr<lsmkv::Iterator> it_;
+    bool valid_ = false;
+    Value pk_;
+    Row row_;
+    lsmkv::Status status_;
+};
 
 // Snapshot-isolated transaction with eager durable writes.
 //
@@ -38,16 +83,21 @@ public:
     lsmkv::Status Update(const std::string& table, const Row& row);
     lsmkv::Status Delete(const std::string& table, const Value& pk);
 
-    // Point lookup by primary key only (v1).
-    // Multi-row query results / table scans / secondary indexes are intentionally
-    // out of scope until the KV layer exposes iterators and we add a scan API.
+    // Point lookup by primary key.
     lsmkv::Status Get(const std::string& table, const Value& pk, Row* out);
+
+    // Scan rows visible to this transaction in KV key order (encoded PK order).
+    // start_pk inclusive when non-null; end_pk exclusive when non-null.
+    // Both null: full table. Caller owns *out.
+    lsmkv::Status Scan(const std::string& table, const Value* start_pk, const Value* end_pk,
+                       std::unique_ptr<RowScan>* out);
 
     lsmkv::Status Commit();
     lsmkv::Status Abort();
 
 private:
     friend class Database;
+    friend class RowScan;
 
     struct WrittenKey {
         std::string table;
