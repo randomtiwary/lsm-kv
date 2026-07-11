@@ -135,11 +135,11 @@ Dockerfile       Multi-stage image for the server
 docker-compose.yml  Two sample server instances
 ```
 
-## Relational layer (in progress)
+## Relational layer (MVCC + snapshot isolation)
 
 An educational **relational database** with **MVCC** storage and **snapshot isolation**
-is being added on branch `feature/relational-db` (see [docs/RELATIONAL.md](docs/RELATIONAL.md)).
-It sits on top of `lsmkv::DB` and does not change LSM internals.
+sits on top of `lsmkv::DB` (see [docs/RELATIONAL.md](docs/RELATIONAL.md)). It does not
+change LSM internals.
 
 ## Implementation roadmap
 

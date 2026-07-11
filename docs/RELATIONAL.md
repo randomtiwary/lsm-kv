@@ -1,9 +1,8 @@
 # Relational Layer on lsm-kv
 
-**Status:** Active  
+**Status:** Active (core SI stack on `main`)  
 **Date:** 2026-07-09  
-**Language:** C++17  
-**Branch:** `feature/relational-db`
+**Language:** C++17
 
 ## Overview
 
@@ -204,8 +203,8 @@ Commits are serialized for simplicity (educational correctness over throughput).
 
 ## PR Plan
 
-Work lands on `feature/relational-db` via small PRs, then the feature branch merges to
-`main`.
+Core stack (PRs 12–16) was developed on `feature/relational-db` and merged to `main`.
+Remaining items (SI concurrency tests, Option A recovery) follow as normal PRs to `main`.
 
 ### PR 12: Design + library scaffold
 - **Files:** `docs/RELATIONAL.md`, `docs/DESIGN.md` (pointer), CMake `src/reldb/`,
@@ -236,8 +235,8 @@ Work lands on `feature/relational-db` via small PRs, then the feature branch mer
 
 ## Planned follow-up: crash-safe commit (Option A)
 
-**Status:** TODO — implement **after** the current PR stack lands on
-`feature/relational-db` (provisional MVCC → txn registry → eager writes → SI tests).
+**Status:** TODO — implement after the core SI stack (provisional MVCC → txn
+registry → eager writes); SI concurrency tests may land in parallel.
 
 There is **no reldb-level WAL**. Multi-Put commit is not atomic; durability is
 per key via `lsmkv` WAL only. Mid-commit crash recovery is **not** implemented yet.

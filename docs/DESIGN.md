@@ -120,7 +120,7 @@ Completed (see `server/`, `Dockerfile`).
 A simple relational database on top of `lsmkv::DB` lives under `include/reldb/` and
 `src/reldb/`. Full design, key layout, SI protocol, and PR breakdown:
 
-**→ [docs/RELATIONAL.md](RELATIONAL.md)** (PRs 12–17 on branch `feature/relational-db`)
+**→ [docs/RELATIONAL.md](RELATIONAL.md)** (PRs 12–17; core stack on `main`)
 
 ## Open Questions
 
