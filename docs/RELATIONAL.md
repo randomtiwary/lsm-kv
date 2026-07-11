@@ -1,0 +1,274 @@
+# Relational Layer on lsm-kv
+
+**Status:** Active (core SI stack on `main`)  
+**Date:** 2026-07-09  
+**Language:** C++17
+
+## Overview
+
+This document describes a **simple educational relational database** built on top of
+the existing `lsmkv::DB` key-value engine. The layer provides:
+
+- Tables with named columns and a single primary key
+- Multi-version concurrency control (**MVCC**) for row storage
+- **Snapshot isolation (SI)** for transactions
+- A programmatic C++ API (no SQL parser in v1)
+
+Clarity beats performance. The design prefers explicit data structures and tests that
+teach *why* SI works the way it does (including what it does **not** prevent).
+
+## Goals
+
+- Correct `CreateTable` (non-transactional DDL) and transactional `Insert` / `Get` / `Update` / `Delete`
+- MVCC: readers never block writers; each transaction sees a consistent snapshot
+- Snapshot isolation with first-committer-wins write–write conflict detection
+- Durable state via the underlying LSM (WAL + SSTables)
+- Exhaustive unit tests per component and multi-threaded SI tests
+
+## Non-Goals (v1)
+
+- Full SQL parser / planner / optimizer
+- Secondary indexes, foreign keys, joins
+- Serializable isolation (SSI / true serializability)
+- Range scans / multi-row queries / table iterators (point lookups by PK only; needs KV iterators later)
+- Distributed transactions, 2PC, replication
+
+## Layering
+
+```
+┌─────────────────────────────────────────────┐
+│  reldb::Database / reldb::Transaction       │  public API
+├─────────────────────────────────────────────┤
+│  Catalog  │  TxnManager  │  Table ops       │
+├─────────────────────────────────────────────┤
+│  Schema / Row codec  │  MVCC version store  │
+├─────────────────────────────────────────────┤
+│  lsmkv::DB  (Put / Get / Delete)            │  existing engine
+└─────────────────────────────────────────────┘
+```
+
+The relational layer is a **client** of `lsmkv::DB`. It does not modify LSM internals.
+All relational state (catalog, row versions, timestamp oracle) is stored as ordinary
+user keys/values.
+
+## Why MVCC on a single-version KV?
+
+`lsmkv::DB` stores one value per user key (plus internal sequence numbers used only
+for crash recovery / compaction). Higher-level MVCC is implemented by **encoding
+versions as separate keys** and applying a **visibility function** at read time.
+
+```
+Physical keys (examples):
+
+  c/t/<table_name>              → TableSchema bytes     (catalog)
+  m/next_ts                     → u64 timestamp oracle
+  d/<table>/<pk>                → u64 latest_version_ts (row head pointer)
+  v/<table>/<pk>/<start_ts>     → VersionRecord bytes   (one version)
+```
+
+Point reads walk the version chain via `prev_ts` links (no KV iterator required).
+
+## MVCC version record
+
+```
+VersionRecord {
+  start_ts   : u64   // commit timestamp that created this version
+  end_ts     : u64   // commit timestamp that superseded it; 0 = still live
+  prev_ts    : u64   // previous version's start_ts; 0 = none
+  flags      : u8    // bit0 = is_tombstone (deleted)
+  payload    : bytes // encoded row (empty if tombstone)
+}
+```
+
+### Visibility (snapshot isolation)
+
+A transaction that began with snapshot timestamp `S` sees version `V` iff:
+
+```
+V.start_ts <= S  &&  (V.end_ts == 0 || V.end_ts > S)
+```
+
+Among versions of a row, at most one satisfies this for a given `S` (versions form a
+non-overlapping lifetime chain). If that version is a tombstone, the row is absent.
+
+### Write path (at commit)
+
+For each primary key in the transaction write set:
+
+1. **Insert:** require no live version at commit time; write new version with
+   `start_ts = commit_ts`, `end_ts = 0`.
+2. **Update / Delete:** require a live version; set its `end_ts = commit_ts`;
+   write a new version (payload or tombstone) with `start_ts = commit_ts`.
+
+The row head pointer `d/<table>/<pk>` always stores the latest `start_ts`.
+
+## Snapshot isolation protocol
+
+Optimistic, first-committer-wins (classic SI):
+
+| Step | Action |
+|------|--------|
+| **Begin** | Allocate `txn_id`; `start_ts = last committed`; persist txn status **Open**. |
+| **Read** | MVCC walk: own provisional versions + committed versions visible at `start_ts`. |
+| **Write** | Eager durable provisional version (`start_ts=0`, `created_by=txn_id`). **Early WW:** conflict if another **Open** txn already owns the head provisional on this PK. |
+| **Commit** | Stamp provisional versions with `commit_ts`, close prior committed version, mark txn **Committed**. |
+| **Abort** | Mark txn **Aborted**; restore row heads if they still point at our provisional versions. |
+
+### What SI guarantees
+
+- Each transaction reads a **consistent snapshot** (no dirty reads, no non-repeatable
+  reads of committed data from after `start_ts`).
+- Concurrent writers to the **same primary key**: one commits, the other aborts.
+
+### What SI does **not** guarantee
+
+- **Write skew** / full serializability. Classic example: constraint “at least one
+  doctor on call” can be broken by two concurrent SI transactions each taking one
+  doctor off-call. Teaching tests will document this deliberately.
+
+## Schema model
+
+```
+ColumnType = Int64 | String | Bool
+
+ColumnDef  { name, type, primary_key? }
+TableSchema { name, columns[] }   // exactly one PK column in v1
+Row        { values by column order or name }
+```
+
+Rows are length-prefixed field encodings (see implementation). Schema changes after
+`CreateTable` are out of scope for v1.
+
+### DDL and transactions
+
+**DDL is not transactional in v1.** `CreateTable` (and any future DDL) applies
+immediately outside user transactions: it is not part of a snapshot, is not
+rolled back by `Transaction::Abort`, and does not participate in SI conflict
+detection. Only DML via `Transaction` is snapshot-isolated.
+
+### Point reads vs multi-row queries
+
+`Transaction::Get` is a **primary-key point lookup** returning at most one row.
+Multi-row results (filters, full table scans, joins) are non-goals until the
+underlying KV exposes iterators and we add an explicit scan/query API. That does
+not preclude a multi-row API later; it keeps v1 focused on correct SI for
+single-key access.
+
+## Public API (sketch)
+
+```cpp
+#include "reldb/database.h"
+
+reldb::Database* db = nullptr;
+reldb::Database::Open(options, path, &db);
+
+db->CreateTable(schema);
+
+reldb::Transaction* txn = nullptr;
+db->Begin(&txn);
+
+txn->Insert("users", row);
+txn->Get("users", pk_value, &row);
+txn->Update("users", pk_value, row);
+txn->Delete("users", pk_value);
+
+txn->Commit();   // or txn->Abort();
+delete txn;
+delete db;
+```
+
+## Concurrency model
+
+| Resource | Sync |
+|----------|------|
+| Timestamp oracle + commit apply | Single `std::mutex` in `Database` |
+| Active transaction objects | Per-txn state only; no shared mutable row cache |
+| Underlying `lsmkv::DB` | Existing write mutex + concurrent Get |
+
+Readers of committed data only call `DB::Get` and need no relational lock.
+Commits are serialized for simplicity (educational correctness over throughput).
+
+## Testing strategy (high priority)
+
+| Area | Tests |
+|------|-------|
+| Types / row codec | Round-trip encode/decode, invalid encodings |
+| Schema / catalog | Create, persist across reopen, duplicate table errors |
+| MVCC visibility | Pure unit tests: chains, tombstones, snapshot boundaries |
+| Single-thread txn | Insert/get/update/delete, abort discards writes, read-your-writes |
+| SI conflicts | Two txns update same PK → one Conflict |
+| SI snapshots | T1 reads x; T2 commits change to x; T1 still sees old value |
+| Concurrency stress | Many threads insert/update distinct and overlapping PKs |
+| Write skew doc | Explicit test showing SI allows write skew (educational) |
+
+## PR Plan
+
+Core stack (PRs 12–16) was developed on `feature/relational-db` and merged to `main`.
+Remaining items (SI concurrency tests, Option A recovery) follow as normal PRs to `main`.
+
+### PR 12: Design + library scaffold
+- **Files:** `docs/RELATIONAL.md`, `docs/DESIGN.md` (pointer), CMake `src/reldb/`,
+  `include/reldb/`, smoke test
+- **Description:** Document the architecture; wire an empty `reldb` source set so later
+  PRs only add code.
+
+### PR 13: Types, row codec, table schema
+- **Files:** `types`, `row`, `schema` headers/sources + unit tests
+- **Description:** Column types, `Value`, `Row` encode/decode, `TableSchema` validation.
+
+### PR 14: Catalog persistence
+- **Files:** `catalog` + tests with real `lsmkv::DB`
+- **Description:** Store/load table schemas under `c/t/<name>` keys.
+
+### PR 15: MVCC version store + visibility
+- **Files:** `mvcc` key layout, `VersionRecord`, visibility helpers + pure tests
+- **Description:** Version chain read/write helpers (no transactions yet).
+
+### PR 16: Transactions + Database API
+- **Files:** `txn`, `database`, conflict detection, Status conflict code + tests
+- **Description:** Begin/Commit/Abort, Insert/Get/Update/Delete, SI single-thread cases.
+
+### PR 17: Snapshot isolation concurrency tests
+- **Files:** multi-threaded SI tests, write-skew educational test, README blurb
+- **Description:** Stress overlapping commits; document isolation boundaries.
+
+
+## Planned follow-up: crash-safe commit (Option A)
+
+**Status:** TODO — implement after the core SI stack (provisional MVCC → txn
+registry → eager writes); SI concurrency tests may land in parallel.
+
+There is **no reldb-level WAL**. Multi-Put commit is not atomic; durability is
+per key via `lsmkv` WAL only. Mid-commit crash recovery is **not** implemented yet.
+
+### Design (agreed)
+
+**Option A — durable commit intent, then apply; recover on Open:**
+
+1. **Prepare:** write `m/txn/<id> = { state: Committing, commit_ts, writes: [(table, pk, version_id), ...] }`
+   (or equivalent intent key listing versions).
+2. **Apply:** stamp provisional versions (`start_ts = commit_ts`), close prior
+   versions (`end_ts`); operations must be **idempotent**.
+3. **Finish:** set `state = Committed` (drop or keep write list).
+
+**On `Database::Open` → `RecoverTxns()`:**
+
+- **Committing** txns: **redo** apply for listed writes, then mark **Committed**.
+- **Open** txns: **abort** — restore heads if they point at that txn's provisional
+  versions, mark **Aborted**.
+
+Commit order invariant remains: never mark **Committed** while any of the txn's
+versions still have `start_ts == 0` (stamp during Apply, then Finish).
+
+### Tests (when implementing)
+
+- Simulate partial apply (intent present, some versions unstamped) → reopen →
+  ends Committed and consistent.
+- Simulate crash with only Open provisionals → reopen → Aborted, heads restored.
+- Multi-key commit becomes atomic w.r.t. recovery (not a single fsync group,
+  but redo makes it so).
+
+## Open questions
+
+None for v1 — defaults favor the simplest SI implementation that is still correct and
+easy to review.

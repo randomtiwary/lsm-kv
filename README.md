@@ -122,15 +122,24 @@ docker run --rm -p 7379:7379 -v lsmkv-data:/data lsmkv-server
 ## Project layout
 
 ```
-include/lsmkv/   Public headers
-src/             Implementation
+include/lsmkv/   Public headers (KV engine)
+include/reldb/   Public headers (relational layer, MVCC + SI)
+src/             KV engine implementation
+src/reldb/       Relational layer implementation
 server/          TCP server (Server class + lsmkv_server main)
 tests/           Exhaustive unit + integration tests (incl. server)
 examples/        Minimal CLI example
-docs/DESIGN.md   Design notes and PR roadmap
+docs/DESIGN.md   KV design notes and PR roadmap
+docs/RELATIONAL.md  Relational / MVCC / snapshot-isolation design
 Dockerfile       Multi-stage image for the server
 docker-compose.yml  Two sample server instances
 ```
+
+## Relational layer (MVCC + snapshot isolation)
+
+An educational **relational database** with **MVCC** storage and **snapshot isolation**
+sits on top of `lsmkv::DB` (see [docs/RELATIONAL.md](docs/RELATIONAL.md)). It does not
+change LSM internals.
 
 ## Implementation roadmap
 

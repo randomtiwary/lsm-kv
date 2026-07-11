@@ -5,7 +5,7 @@
 
 namespace lsmkv {
 
-std::string MakeInternalKey(const Slice& user_key, std::uint64_t seq, ValueType t) {
+std::string MakeInternalKey(const Slice& user_key, Timestamp seq, ValueType t) {
     std::string key;
     key.reserve(user_key.size() + 8);
     key.append(user_key.data(), user_key.size());
@@ -18,7 +18,7 @@ Slice ExtractUserKey(const Slice& internal_key) {
     return Slice(internal_key.data(), internal_key.size() - 8);
 }
 
-std::uint64_t ExtractSequence(const Slice& internal_key) {
+Timestamp ExtractSequence(const Slice& internal_key) {
     if (internal_key.size() < 8) return 0;
     std::uint64_t packed = DecodeFixed64(internal_key.data() + internal_key.size() - 8);
     return SequenceFromPack(packed);
@@ -44,7 +44,7 @@ int CompareInternalKey(const Slice& a, const Slice& b) {
     return 0;
 }
 
-std::string MakeLookupKey(const Slice& user_key, std::uint64_t sequence) {
+std::string MakeLookupKey(const Slice& user_key, Timestamp sequence) {
     return MakeInternalKey(user_key, sequence, kTypeValue);
 }
 

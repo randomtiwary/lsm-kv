@@ -113,7 +113,7 @@ bool FileOverlapsRange(const FileMetaData& f, const Slice& smallest, const Slice
     return true;
 }
 
-Status Version::Get(const std::string& dbname, const Slice& user_key, std::uint64_t snapshot,
+Status Version::Get(const std::string& dbname, const Slice& user_key, Timestamp snapshot,
                     std::string* value) const {
     // Newest-first within each level so L0 flush order and overlapping files
     // resolve to the latest visible version at `snapshot`.

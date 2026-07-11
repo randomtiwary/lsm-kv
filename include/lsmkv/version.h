@@ -1,5 +1,7 @@
 #pragma once
 
+#include "lsmkv/common.h"
+
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -74,7 +76,7 @@ struct VersionEdit {
     bool has_next_file_number = false;
     std::uint64_t next_file_number = 0;
     bool has_last_sequence = false;
-    std::uint64_t last_sequence = 0;
+    Timestamp last_sequence = 0;
     bool has_log_number = false;
     std::uint64_t log_number = 0;
     std::vector<std::pair<int, FileMetaData>> added_files;
@@ -84,7 +86,7 @@ struct VersionEdit {
         has_next_file_number = true;
         next_file_number = n;
     }
-    void SetLastSequence(std::uint64_t s) {
+    void SetLastSequence(Timestamp s) {
         has_last_sequence = true;
         last_sequence = s;
     }
@@ -119,7 +121,7 @@ class Version {
 public:
     std::vector<FileMetaData> files[kNumLevels];
 
-    Status Get(const std::string& dbname, const Slice& user_key, std::uint64_t snapshot,
+    Status Get(const std::string& dbname, const Slice& user_key, Timestamp snapshot,
                std::string* value) const;
     int NumLevelFiles(int level) const {
         return static_cast<int>(files[level].size());
@@ -151,8 +153,8 @@ public:
 
     VersionPtr current() const { return current_; }
     std::uint64_t NextFileNumber() { return next_file_number_++; }
-    std::uint64_t LastSequence() const { return last_sequence_; }
-    void SetLastSequence(std::uint64_t s) { last_sequence_ = s; }
+    Timestamp LastSequence() const { return last_sequence_; }
+    void SetLastSequence(Timestamp s) { last_sequence_ = s; }
     std::uint64_t LogNumber() const { return log_number_; }
     std::uint64_t ManifestFileNumber() const { return manifest_file_number_; }
 
@@ -184,7 +186,7 @@ private:
     std::string dbname_;
     VersionPtr current_;
     std::uint64_t next_file_number_ = 2;
-    std::uint64_t last_sequence_ = 0;
+    Timestamp last_sequence_ = 0;
     std::uint64_t log_number_ = 0;
     std::uint64_t manifest_file_number_ = 1;
     std::mutex mu_;
