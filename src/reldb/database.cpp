@@ -85,14 +85,9 @@ lsmkv::Status Database::Open(const lsmkv::Options& options, const std::string& p
     lsmkv::DB* raw = nullptr;
     RELDB_RETURN_NOT_OK(lsmkv::DB::Open(options, path, &raw));
     auto db = std::unique_ptr<Database>(new Database(std::shared_ptr<lsmkv::DB>(raw)));
-    auto st = db->InitOracles();
-    if (!st.ok()) {
-        return st;
-    }
-    st = db->RecoverTxns();
-    if (!st.ok()) {
-        return st;
-    }
+    // unique_ptr destroys db if either step fails.
+    RELDB_RETURN_NOT_OK(db->InitOracles());
+    RELDB_RETURN_NOT_OK(db->RecoverTxns());
     *dbptr = std::move(db);
     return STATUS(OK);
 }
