@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "lsmkv/status.h"
+
 namespace test {
 
 struct Stats {
@@ -44,6 +46,18 @@ inline void expect_eq(const A& a, const B& b, const std::string& msg) {
         std::cerr << "FAIL: " << msg << "\n  expected: " << b << "\n  actual:   " << a << "\n";
     }
 }
+
+inline void expect_ok(const lsmkv::Status& st, const std::string& msg) {
+    if (st.ok()) {
+        ++stats().passed;
+    } else {
+        ++stats().failed;
+        std::cerr << "FAIL: " << msg << ": " << st.ToString() << "\n";
+    }
+}
+
+// Asserts that a Status-producing expression is OK.
+#define EXPECT_OK(expr, msg) ::test::expect_ok((expr), (msg))
 
 using TestFn = void (*)();
 

@@ -37,19 +37,18 @@ Database::Database(std::shared_ptr<lsmkv::DB> kv)
 Database::~Database() = default;
 
 lsmkv::Status Database::Open(const lsmkv::Options& options, const std::string& path,
-                             Database** dbptr) {
+                             std::unique_ptr<Database>* dbptr) {
     if (dbptr == nullptr) {
         return STATUS(InvalidArgument, "null dbptr");
     }
     lsmkv::DB* raw = nullptr;
     RELDB_RETURN_NOT_OK(lsmkv::DB::Open(options, path, &raw));
-    auto* db = new Database(std::shared_ptr<lsmkv::DB>(raw));
+    auto db = std::unique_ptr<Database>(new Database(std::shared_ptr<lsmkv::DB>(raw)));
     auto st = db->InitOracles();
     if (!st.ok()) {
-        delete db;
         return st;
     }
-    *dbptr = db;
+    *dbptr = std::move(db);
     return STATUS(OK);
 }
 
@@ -104,8 +103,12 @@ lsmkv::Status Database::PutTxnMeta(TxnId id, const TxnMeta& meta) {
     return kv_->Put(lsmkv::WriteOptions(), TxnKey(id), EncodeTxnMeta(meta));
 }
 
-lsmkv::Status Database::Begin(Transaction** txn) {
+lsmkv::Status Database::Begin(std::unique_ptr<Transaction>* txn) {
     if (txn == nullptr) return STATUS(InvalidArgument, "null txn");
+    // Caller must pass an empty unique_ptr; do not silently replace an open txn.
+    if (txn->get() != nullptr) {
+        return STATUS(InvalidArgument, "txn already holds a transaction");
+    }
     std::lock_guard<std::mutex> lock(mu_);
     const TxnId id = next_txn_id_++;
     const Timestamp start_ts = next_ts_ - 1;
@@ -114,7 +117,7 @@ lsmkv::Status Database::Begin(Transaction** txn) {
     meta.state = TxnState::kOpen;
     meta.commit_ts = 0;
     RELDB_RETURN_NOT_OK(PutTxnMeta(id, meta));
-    *txn = new Transaction(this, id, start_ts);
+    *txn = std::unique_ptr<Transaction>(new Transaction(this, id, start_ts));
     return STATUS(OK);
 }
 
