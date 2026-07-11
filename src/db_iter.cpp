@@ -1,3 +1,37 @@
+// DB user-key iterator
+// ====================
+//
+// Goal: walk the database in user-key order and, for each user key, yield the
+// same live value that Get() would return at a fixed sequence snapshot (or
+// hide the key if the newest visible version is a tombstone).
+//
+// Layers in this file (bottom → top):
+//
+//   1. InternalIter
+//      Abstract stream of *internal* keys (user_key + seq + type) + values.
+//      Two implementations:
+//        - MemTableInternalIter  — skiplist over mem_ / imm_ entries
+//        - SSTableInternalIter   — one open SSTable::Iterator per file
+//
+//   2. MergingInternalIter
+//      Merges many InternalIters by internal-key order (user key ascending,
+//      sequence descending). At any step, Valid() points at the "smallest"
+//      internal key among children — so for a given user key the highest
+//      sequence appears first.
+//
+//   3. DBIterator (public lsmkv::Iterator)
+//      On construction, snapshots mem_, imm_, Version, and the read sequence
+//      (same as Get). Builds child iters for mem, imm, and every L0/L1 file.
+//      AdvanceToNextVisibleKey():
+//        - skip internal keys with seq > snapshot
+//        - take the first remaining internal key for a user key (newest
+//          visible version)
+//        - skip all further versions of that user key
+//        - if that version is a deletion, continue; else expose user key/value
+//
+// Seek(user_key) builds the same lookup internal key as Get, seeks the merge,
+// then runs AdvanceToNextVisibleKey so the first emitted key is >= target.
+
 #include "db_impl.h"
 
 #include <algorithm>
