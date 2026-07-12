@@ -68,6 +68,10 @@ public:
 
     Kind kind() const { return kind_; }
 
+    // Human-readable tree for tests, debugging, and EXPLAIN-style output.
+    // Example: And(Compare(Eq, Column(id), Literal(1)), Column(active))
+    std::string ToString() const;
+
     // Resolve column names to indices for schema. Safe to call more than once.
     lsmkv::Status Bind(const TableSchema& schema);
 

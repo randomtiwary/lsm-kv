@@ -55,6 +55,75 @@ std::unique_ptr<Expr> Expr::Not(std::unique_ptr<Expr> child) {
     return e;
 }
 
+namespace {
+
+const char* CmpOpName(CmpOp op) {
+    switch (op) {
+        case CmpOp::kEq: return "Eq";
+        case CmpOp::kNe: return "Ne";
+        case CmpOp::kLt: return "Lt";
+        case CmpOp::kLe: return "Le";
+        case CmpOp::kGt: return "Gt";
+        case CmpOp::kGe: return "Ge";
+    }
+    return "?";
+}
+
+const char* LogicOpName(LogicOp op) {
+    switch (op) {
+        case LogicOp::kAnd: return "And";
+        case LogicOp::kOr: return "Or";
+        case LogicOp::kNot: return "Not";
+    }
+    return "?";
+}
+
+// Quote a Value for Expr::ToString (strings use single quotes, '' escape).
+std::string FormatLiteral(const Value& v) {
+    if (v.IsNull()) return "NULL";
+    if (v.type() == ColumnType::kString) {
+        std::string out = "'";
+        for (char c : v.GetString()) {
+            if (c == '\'') {
+                out += "''";
+            } else {
+                out.push_back(c);
+            }
+        }
+        out.push_back('\'');
+        return out;
+    }
+    return v.ToString();
+}
+
+}  // namespace
+
+std::string Expr::ToString() const {
+    switch (kind_) {
+        case Kind::kLiteral:
+            return "Literal(" + FormatLiteral(literal_) + ")";
+        case Kind::kColumn:
+            return "Column(" + column_name_ + ")";
+        case Kind::kCompare: {
+            std::string left = left_ ? left_->ToString() : "?";
+            std::string right = right_ ? right_->ToString() : "?";
+            return std::string("Compare(") + CmpOpName(cmp_op_) + ", " + left + ", " + right +
+                   ")";
+        }
+        case Kind::kLogic:
+            if (logic_op_ == LogicOp::kNot) {
+                std::string child = left_ ? left_->ToString() : "?";
+                return "Not(" + child + ")";
+            }
+            {
+                std::string left = left_ ? left_->ToString() : "?";
+                std::string right = right_ ? right_->ToString() : "?";
+                return std::string(LogicOpName(logic_op_)) + "(" + left + ", " + right + ")";
+            }
+    }
+    return "Expr(?)";
+}
+
 lsmkv::Status Expr::Bind(const TableSchema& schema) {
     switch (kind_) {
         case Kind::kLiteral:
