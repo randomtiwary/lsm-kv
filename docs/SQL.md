@@ -43,6 +43,10 @@ tests that show *why* a plan chose a point lookup vs a table scan.
 - Changing LSM internals beyond a public `DB` iterator
 - Serializable isolation
 
+**Roadmap (post-v1):** SQL network server, `DROP` / `ALTER TABLE`, aggregates, and
+joins are planned in [ROADMAP_SERVER_DDL_AGG_JOIN.md](ROADMAP_SERVER_DDL_AGG_JOIN.md)
+(build order: server → DDL → aggregates → joins).
+
 ## Layering
 
 ```
