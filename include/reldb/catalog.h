@@ -10,17 +10,20 @@
 
 namespace reldb {
 
+class Database;
+// Test-only peer (see tests/test_reldb_catalog.cpp). Not for production use.
+class CatalogTestAccess;
+
 // Persists TableSchema records in an lsmkv::DB under keys:
 //   c/t/<table_name>  →  TableSchema::Encode() bytes
 //
 // Keeps an in-memory cache populated on Create / Get (after miss).
 // v1 does not support DROP TABLE or ALTER (see roadmap).
 //
-// Thread-safety: Catalog itself never locks. Concurrent Create/Get/Has that
-// touch the mutable cache_ are data races unless the caller serializes them.
-// When Catalog is owned by reldb::Database, every call must be made while
-// holding Database::mu_ (use Database::CreateTable / GetTable / HasTable).
-// Standalone unit tests may use Catalog single-threaded without a lock.
+// Access control: Create/Get/Has are private. Only Database (production) and
+// CatalogTestAccess (unit tests) may call them. Database serializes access with
+// its shared_mutex (shared for pure cache hits, unique for mutations / KV loads).
+// Catalog itself never locks.
 //
 // Shares ownership of the underlying DB via shared_ptr so Catalog can outlive
 // the creating stack frame without a raw non-owning pointer.
@@ -28,24 +31,32 @@ class Catalog {
 public:
     explicit Catalog(std::shared_ptr<lsmkv::DB> db);
 
+    // Key encoding helper (also used by tests).
+    static std::string TableKey(const std::string& table_name);
+
+private:
+    friend class Database;
+    friend class CatalogTestAccess;
+
     // Validate schema, reject duplicates, Put to KV, update cache.
-    // Precondition (multi-threaded): caller holds Database::mu_.
+    // Caller must hold Database::mu_ exclusively (unique_lock).
     lsmkv::Status CreateTable(const TableSchema& schema);
 
     // Lookup by name (cache then KV). NotFound if missing.
-    // Precondition (multi-threaded): caller holds Database::mu_.
+    // May mutate cache_ on miss — caller must hold Database::mu_ exclusively.
     lsmkv::Status GetTable(const std::string& name, TableSchema* out) const;
 
     // Sets *exists to whether the table is present. Returns OK on a definitive
     // answer; propagates IO/corruption (and other) errors from the KV layer.
     // Does not treat non-NotFound failures as "missing".
-    // Precondition (multi-threaded): caller holds Database::mu_.
+    // May mutate cache_ — caller must hold Database::mu_ exclusively.
     lsmkv::Status HasTable(const std::string& name, bool* exists) const;
 
-    // Key encoding helper (also used by tests).
-    static std::string TableKey(const std::string& table_name);
+    // Read-only cache probe. Does not touch KV or mutate cache_.
+    // Safe under a shared lock on Database::mu_.
+    // Returns true and fills *out on hit; false on miss (*out unchanged).
+    bool LookupCache(const std::string& name, TableSchema* out) const;
 
-private:
     std::shared_ptr<lsmkv::DB> db_;
     // Mutable cache: GetTable is logically const from the caller's view.
     mutable std::unordered_map<std::string, TableSchema> cache_;

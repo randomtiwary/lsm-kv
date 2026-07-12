@@ -1,5 +1,8 @@
 #include "reldb/database.h"
 
+#include <mutex>
+#include <shared_mutex>
+
 #include "lsmkv/encoding.h"
 #include "lsmkv/slice.h"
 #include "reldb/macros.h"
@@ -126,18 +129,41 @@ lsmkv::Status Database::PersistOracles() {
 }
 
 lsmkv::Status Database::CreateTable(const TableSchema& schema) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     return catalog_->CreateTable(schema);
 }
 
 lsmkv::Status Database::GetTable(const std::string& name, TableSchema* out) const {
-    std::lock_guard<std::mutex> lock(mu_);
+    if (out == nullptr) {
+        return STATUS(InvalidArgument, "null out");
+    }
+    // Fast path: concurrent readers share the lock; LookupCache does not mutate.
+    {
+        std::shared_lock<std::shared_mutex> lock(mu_);
+        if (catalog_->LookupCache(name, out)) {
+            return STATUS(OK);
+        }
+    }
+    // Slow path: load from KV and fill cache under exclusive lock (double-check).
+    std::unique_lock<std::shared_mutex> lock(mu_);
     return catalog_->GetTable(name, out);
 }
 
 lsmkv::Status Database::HasTable(const std::string& name, bool* exists) const {
-    std::lock_guard<std::mutex> lock(mu_);
-    return catalog_->HasTable(name, exists);
+    if (exists == nullptr) {
+        return STATUS(InvalidArgument, "null exists");
+    }
+    TableSchema unused;
+    auto st = GetTable(name, &unused);
+    if (st.ok()) {
+        *exists = true;
+        return STATUS(OK);
+    }
+    if (st.IsNotFound()) {
+        *exists = false;
+        return STATUS(OK);
+    }
+    return st;
 }
 
 lsmkv::Status Database::GetTxnMeta(TxnId id, TxnMeta* out) const {
@@ -159,7 +185,7 @@ lsmkv::Status Database::Begin(std::unique_ptr<Transaction>* txn) {
     if (txn->get() != nullptr) {
         return STATUS(InvalidArgument, "txn already holds a transaction");
     }
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     const TxnId id = next_txn_id_++;
     const Timestamp start_ts = next_ts_ - 1;
     RELDB_RETURN_NOT_OK(PersistOracles());
@@ -274,7 +300,7 @@ lsmkv::Status Database::RecoverTxns() {
 }
 
 lsmkv::Status Database::CommitTransaction(Transaction* txn) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     if (txn->finished_) return STATUS(InvalidArgument, "transaction already finished");
 
     // First-committer-wins re-check before allocating commit_ts.
@@ -343,7 +369,7 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
 }
 
 lsmkv::Status Database::AbortTransaction(Transaction* txn) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     if (txn->finished_) return STATUS(OK);
     RELDB_RETURN_NOT_OK(RestoreWrittenHeads(txn));
     TxnMeta meta;

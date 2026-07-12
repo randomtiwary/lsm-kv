@@ -33,7 +33,7 @@ reldb::TableSchema TableN(int n) {
 }  // namespace
 
 // Concurrent CreateTable (distinct names) + GetTable / HasTable must not crash
-// or corrupt the catalog cache (A0.5: all catalog access under Database::mu_).
+// or corrupt the catalog cache (A0.5: Database shared_mutex: shared on cache hit, exclusive on create/load..
 TEST(reldb_catalog_mt_create_and_get) {
     auto dir = MakeTempDir("reldb_cat_mt");
     {

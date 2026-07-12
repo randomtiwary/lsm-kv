@@ -1,6 +1,8 @@
 #include "reldb/txn.h"
 
 #include <cstring>
+#include <mutex>
+#include <shared_mutex>
 
 #include "reldb/database.h"
 #include "reldb/macros.h"
@@ -33,7 +35,7 @@ lsmkv::Status Transaction::Write(const std::string& table, const Value& pk, bool
                                  const Row* row, bool is_insert) {
     if (finished_) return STATUS(InvalidArgument, "transaction finished");
 
-    std::lock_guard<std::mutex> lock(db_->mu_);
+    std::unique_lock<std::shared_mutex> lock(db_->mu_);
 
     // Already wrote this PK in this txn? Update the same provisional version.
     for (auto& w : written_) {
@@ -194,11 +196,12 @@ lsmkv::Status Transaction::Delete(const std::string& table, const Value& pk) {
 lsmkv::Status Transaction::Get(const std::string& table, const Value& pk, Row* out) {
     if (finished_) return STATUS(InvalidArgument, "transaction finished");
     if (out == nullptr) return STATUS(InvalidArgument, "null out");
-    // Catalog + row read under one mu_ hold (avoids nested lock via GetTable).
-    std::lock_guard<std::mutex> lock(db_->mu_);
+    // Catalog existence via GetTable (shared or unique internally — does not nest).
     TableSchema schema;
-    RELDB_RETURN_NOT_OK(db_->catalog_->GetTable(table, &schema));
+    RELDB_RETURN_NOT_OK(db_->GetTable(table, &schema));
     (void)schema;  // existence check; row layout comes from stored payload
+    // Concurrent snapshot reads share mu_; writers take exclusive in Write/Commit.
+    std::shared_lock<std::shared_mutex> lock(db_->mu_);
     return db_->store_->GetRow(
         table, pk, start_ts_, txn_id_,
         [this](TxnId id, TxnMeta* m) { return db_->GetTxnMeta(id, m); }, out);
@@ -250,7 +253,7 @@ lsmkv::Status TableRowScan::Advance() {
         Row row;
         lsmkv::Status st;
         {
-            std::lock_guard<std::mutex> lock(db_->mu_);
+            std::shared_lock<std::shared_mutex> lock(db_->mu_);
             st = db_->store_->GetRow(
                 table_, pk, start_ts_, txn_id_,
                 [this](TxnId id, TxnMeta* m) { return db_->GetTxnMeta(id, m); }, &row);
