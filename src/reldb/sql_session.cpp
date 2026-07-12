@@ -94,6 +94,57 @@ std::string PkColumnName(const TableSchema& schema) {
 
 }  // namespace
 
+// RAII for statement-level autocommit.
+// Ensure() begins a txn when the session has none. Complete(op_st) commits on
+// success or aborts on failure. If Complete is skipped (early return / exception),
+// the destructor aborts the auto-txn so we never leave a dangling one open.
+class SqlSession::AutoTxnGuard {
+public:
+    explicit AutoTxnGuard(SqlSession& session) : session_(session) {}
+
+    AutoTxnGuard(const AutoTxnGuard&) = delete;
+    AutoTxnGuard& operator=(const AutoTxnGuard&) = delete;
+
+    ~AutoTxnGuard() {
+        if (!active_) return;
+        session_.auto_txn_ = false;
+        if (session_.txn_ != nullptr) {
+            (void)session_.txn_->Abort();
+            session_.txn_.reset();
+        }
+    }
+
+    // Begin a session txn if needed; marks this guard as responsible for finishing it.
+    lsmkv::Status Ensure() {
+        if (session_.txn_ != nullptr) return STATUS(OK);
+        RELDB_RETURN_NOT_OK(session_.db_->Begin(&session_.txn_));
+        session_.auto_txn_ = true;
+        active_ = true;
+        return STATUS(OK);
+    }
+
+    // Finish the auto-txn (if any). Must be used on every intentional return path
+    // after Ensure; otherwise the destructor aborts.
+    lsmkv::Status Complete(const lsmkv::Status& op_st) {
+        if (!active_) return op_st;
+        active_ = false;
+        session_.auto_txn_ = false;
+        if (op_st.ok()) {
+            const auto cst = session_.txn_->Commit();
+            session_.txn_.reset();
+            RELDB_RETURN_NOT_OK(cst);
+            return op_st;
+        }
+        (void)session_.txn_->Abort();
+        session_.txn_.reset();
+        return op_st;
+    }
+
+private:
+    SqlSession& session_;
+    bool active_ = false;
+};
+
 SqlSession::SqlSession(std::shared_ptr<Database> db) : db_(std::move(db)) {}
 
 lsmkv::Status SqlSession::Execute(std::string_view sql, QueryResult& result) {
@@ -111,30 +162,6 @@ lsmkv::Status SqlSession::Execute(std::string_view sql, QueryResult& result) {
 lsmkv::Status SqlSession::LookupTable(const std::string& name, TableSchema* out) const {
     if (out == nullptr) return STATUS(InvalidArgument, "null schema out");
     return db_->catalog()->GetTable(name, out);
-}
-
-lsmkv::Status SqlSession::EnsureTxn(bool* used_auto) {
-    if (used_auto == nullptr) return STATUS(InvalidArgument, "null used_auto");
-    *used_auto = false;
-    if (txn_ != nullptr) return STATUS(OK);
-    RELDB_RETURN_NOT_OK(db_->Begin(&txn_));
-    auto_txn_ = true;
-    *used_auto = true;
-    return STATUS(OK);
-}
-
-lsmkv::Status SqlSession::FinishAuto(const lsmkv::Status& op_st) {
-    if (!auto_txn_ || txn_ == nullptr) return op_st;
-    auto_txn_ = false;
-    if (op_st.ok()) {
-        const auto cst = txn_->Commit();
-        txn_.reset();
-        if (!cst.ok()) return cst;
-        return op_st;
-    }
-    (void)txn_->Abort();
-    txn_.reset();
-    return op_st;
 }
 
 lsmkv::Status SqlSession::RunStatement(Statement stmt, QueryResult& result) {
@@ -248,12 +275,10 @@ lsmkv::Status SqlSession::RunInsert(InsertStmt stmt, QueryResult& result) {
     }
     RELDB_RETURN_NOT_OK(row.ValidateAgainst(schema));
 
-    bool used_auto = false;
-    RELDB_RETURN_NOT_OK(EnsureTxn(&used_auto));
+    AutoTxnGuard auto_txn(*this);
+    RELDB_RETURN_NOT_OK(auto_txn.Ensure());
     InsertOp op(*txn_, schema.name(), {std::move(row)});
-    const auto st = op.Execute(result);
-    if (used_auto) return FinishAuto(st);
-    return st;
+    return auto_txn.Complete(op.Execute(result));
 }
 
 lsmkv::Status SqlSession::PlanAccess(Transaction& txn, const TableSchema& schema,
@@ -308,41 +333,30 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
     TableSchema schema;
     RELDB_RETURN_NOT_OK(LookupTable(stmt.table_name, &schema));
 
-    bool used_auto = false;
-    RELDB_RETURN_NOT_OK(EnsureTxn(&used_auto));
-
-    auto fail = [&](const lsmkv::Status& st) -> lsmkv::Status {
-        if (used_auto) return FinishAuto(st);
-        return st;
-    };
+    AutoTxnGuard auto_txn(*this);
+    RELDB_RETURN_NOT_OK(auto_txn.Ensure());
 
     std::unique_ptr<Executor> plan;
     std::string access_tag;
-    {
-        auto st = PlanAccess(*txn_, schema, std::move(stmt.where), &plan, &access_tag);
-        if (!st.ok()) return fail(st);
-    }
+    RELDB_RETURN_NOT_OK(
+        PlanAccess(*txn_, schema, std::move(stmt.where), &plan, &access_tag));
 
     // Projection names (for ORDER BY after Project).
     std::vector<std::string> out_names;
-    const bool projected = !stmt.select_star;
-    if (projected) {
+    if (!stmt.select_star) {
         if (stmt.select_list.empty()) {
-            return fail(STATUS(InvalidArgument, "empty SELECT list"));
+            return auto_txn.Complete(STATUS(InvalidArgument, "empty SELECT list"));
         }
         std::vector<Projection> projs;
         projs.reserve(stmt.select_list.size());
         out_names.reserve(stmt.select_list.size());
         for (auto& e : stmt.select_list) {
             if (e == nullptr) {
-                return fail(STATUS(InvalidArgument, "null select expression"));
+                return auto_txn.Complete(STATUS(InvalidArgument, "null select expression"));
             }
             std::string name =
                 (e->kind() == Expr::Kind::kColumn) ? e->column_name() : e->ToString();
-            {
-                auto st = e->Bind(schema);
-                if (!st.ok()) return fail(st);
-            }
+            RELDB_RETURN_NOT_OK(e->Bind(schema));
             out_names.push_back(name);
             projs.push_back(Projection{std::move(name), std::move(e)});
         }
@@ -365,7 +379,8 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
                 }
             }
             if (idx < 0) {
-                return fail(STATUS(InvalidArgument, "unknown ORDER BY column: " + o.column_name));
+                return auto_txn.Complete(
+                    STATUS(InvalidArgument, "unknown ORDER BY column: " + o.column_name));
             }
             keys.push_back(SortKey{idx, o.ascending});
         }
@@ -374,15 +389,13 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
 
     if (stmt.has_limit) {
         if (stmt.limit < 0) {
-            return fail(STATUS(InvalidArgument, "LIMIT must be non-negative"));
+            return auto_txn.Complete(STATUS(InvalidArgument, "LIMIT must be non-negative"));
         }
         plan = std::make_unique<LimitExecutor>(std::move(plan),
                                                static_cast<std::uint64_t>(stmt.limit));
     }
 
-    auto st = Collect(*plan, result);
-    if (used_auto) return FinishAuto(st);
-    return st;
+    return auto_txn.Complete(Collect(*plan, result));
 }
 
 lsmkv::Status SqlSession::RunUpdate(UpdateStmt stmt, QueryResult& result) {
@@ -403,42 +416,32 @@ lsmkv::Status SqlSession::RunUpdate(UpdateStmt stmt, QueryResult& result) {
         assigns.push_back(Assignment{idx, std::move(a.value)});
     }
 
-    bool used_auto = false;
-    RELDB_RETURN_NOT_OK(EnsureTxn(&used_auto));
+    AutoTxnGuard auto_txn(*this);
+    RELDB_RETURN_NOT_OK(auto_txn.Ensure());
 
     std::unique_ptr<Executor> source;
     std::string access_tag;
-    auto st_plan = PlanAccess(*txn_, schema, std::move(stmt.where), &source, &access_tag);
-    if (!st_plan.ok()) {
-        if (used_auto) return FinishAuto(st_plan);
-        return st_plan;
-    }
+    RELDB_RETURN_NOT_OK(
+        PlanAccess(*txn_, schema, std::move(stmt.where), &source, &access_tag));
 
     UpdateOp op(*txn_, schema, std::move(source), std::move(assigns));
-    const auto st = op.Execute(result);
-    if (used_auto) return FinishAuto(st);
-    return st;
+    return auto_txn.Complete(op.Execute(result));
 }
 
 lsmkv::Status SqlSession::RunDelete(DeleteStmt stmt, QueryResult& result) {
     TableSchema schema;
     RELDB_RETURN_NOT_OK(LookupTable(stmt.table_name, &schema));
 
-    bool used_auto = false;
-    RELDB_RETURN_NOT_OK(EnsureTxn(&used_auto));
+    AutoTxnGuard auto_txn(*this);
+    RELDB_RETURN_NOT_OK(auto_txn.Ensure());
 
     std::unique_ptr<Executor> source;
     std::string access_tag;
-    auto st_plan = PlanAccess(*txn_, schema, std::move(stmt.where), &source, &access_tag);
-    if (!st_plan.ok()) {
-        if (used_auto) return FinishAuto(st_plan);
-        return st_plan;
-    }
+    RELDB_RETURN_NOT_OK(
+        PlanAccess(*txn_, schema, std::move(stmt.where), &source, &access_tag));
 
     DeleteOp op(*txn_, schema, std::move(source));
-    const auto st = op.Execute(result);
-    if (used_auto) return FinishAuto(st);
-    return st;
+    return auto_txn.Complete(op.Execute(result));
 }
 
 }  // namespace reldb

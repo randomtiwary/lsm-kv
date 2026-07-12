@@ -45,10 +45,8 @@ private:
     lsmkv::Status RunUpdate(UpdateStmt stmt, QueryResult& result);
     lsmkv::Status RunDelete(DeleteStmt stmt, QueryResult& result);
 
-    // Opens txn_ for autocommit when none is open. Sets *used_auto.
-    lsmkv::Status EnsureTxn(bool* used_auto);
-    // After an auto-txn statement: Commit on success, Abort on failure; clear txn_.
-    lsmkv::Status FinishAuto(const lsmkv::Status& op_st);
+    // RAII helper for statement-level autocommit (defined in sql_session.cpp).
+    class AutoTxnGuard;
 
     lsmkv::Status LookupTable(const std::string& name, TableSchema* out) const;
 
