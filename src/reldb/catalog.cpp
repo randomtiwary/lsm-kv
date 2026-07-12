@@ -11,6 +11,14 @@ std::string Catalog::TableKey(const std::string& table_name) {
     return "c/t/" + table_name;
 }
 
+bool Catalog::LookupCache(const std::string& name, TableSchema* out) const {
+    if (out == nullptr) return false;
+    auto it = cache_.find(name);
+    if (it == cache_.end()) return false;
+    *out = it->second;
+    return true;
+}
+
 lsmkv::Status Catalog::CreateTable(const TableSchema& schema) {
     RELDB_RETURN_NOT_OK(schema.Validate());
 
@@ -31,9 +39,7 @@ lsmkv::Status Catalog::GetTable(const std::string& name, TableSchema* out) const
     if (out == nullptr) {
         return STATUS(InvalidArgument, "null out");
     }
-    auto it = cache_.find(name);
-    if (it != cache_.end()) {
-        *out = it->second;
+    if (LookupCache(name, out)) {
         return STATUS(OK);
     }
 

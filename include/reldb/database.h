@@ -1,7 +1,7 @@
 #pragma once
 
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <string>
 
 #include "lsmkv/common.h"
@@ -34,7 +34,13 @@ public:
 
     // DDL is NOT transactional in v1: applies immediately outside any user
     // Transaction (no snapshot, no Abort rollback). See docs/RELATIONAL.md.
+    // Takes mu_ exclusively (Catalog API is private to Database).
     lsmkv::Status CreateTable(const TableSchema& schema);
+
+    // Catalog lookup. Uses a shared lock on cache hits; upgrades to exclusive
+    // only when loading from KV / filling the cache (double-checked).
+    lsmkv::Status GetTable(const std::string& name, TableSchema* out) const;
+    lsmkv::Status HasTable(const std::string& name, bool* exists) const;
 
     // Allocates a Transaction with a fresh txn_id and start_ts = last commit.
     // *txn must be empty (get() == nullptr); otherwise InvalidArgument.
@@ -42,7 +48,6 @@ public:
     // Transaction holds a shared_ptr to this Database.
     lsmkv::Status Begin(std::unique_ptr<Transaction>* txn);
 
-    std::shared_ptr<Catalog> catalog() const { return catalog_; }
     std::shared_ptr<MvccStore> store() const { return store_; }
     std::shared_ptr<lsmkv::DB> kv() const { return kv_; }
 
@@ -66,7 +71,10 @@ private:
     lsmkv::Status RestoreHeads(const std::vector<TxnWrite>& writes);
     lsmkv::Status RestoreWrittenHeads(Transaction* txn);
 
-    std::mutex mu_;
+    // Shared for concurrent reads (GetTable cache hit, Transaction::Get, scan
+    // visibility); exclusive for DDL, Begin/Commit/Abort, and writes.
+    // Mutable so const GetTable/HasTable can lock.
+    mutable std::shared_mutex mu_;
     std::shared_ptr<lsmkv::DB> kv_;
     std::shared_ptr<Catalog> catalog_;
     std::shared_ptr<MvccStore> store_;

@@ -8,6 +8,25 @@
 #include "reldb/schema.h"
 #include "reldb/types.h"
 
+namespace reldb {
+
+// Test-only peer for Catalog private methods (single-threaded unit tests).
+class CatalogTestAccess {
+public:
+    static lsmkv::Status CreateTable(Catalog& cat, const TableSchema& schema) {
+        return cat.CreateTable(schema);
+    }
+    static lsmkv::Status GetTable(const Catalog& cat, const std::string& name,
+                                  TableSchema* out) {
+        return cat.GetTable(name, out);
+    }
+    static lsmkv::Status HasTable(const Catalog& cat, const std::string& name, bool* exists) {
+        return cat.HasTable(name, exists);
+    }
+};
+
+}  // namespace reldb
+
 namespace {
 
 reldb::TableSchema UsersSchema() {
@@ -28,6 +47,8 @@ std::shared_ptr<lsmkv::DB> OpenKv(const std::string& dir) {
     return std::shared_ptr<lsmkv::DB>(raw);
 }
 
+using Access = reldb::CatalogTestAccess;
+
 }  // namespace
 
 TEST(reldb_catalog_create_and_get) {
@@ -36,21 +57,21 @@ TEST(reldb_catalog_create_and_get) {
     expect(kv != nullptr, "open kv");
 
     reldb::Catalog cat(kv);
-    expect(cat.CreateTable(UsersSchema()).ok(), "create");
+    expect(Access::CreateTable(cat, UsersSchema()).ok(), "create");
     bool exists = false;
-    expect(cat.HasTable("users", &exists).ok(), "has status");
+    expect(Access::HasTable(cat, "users", &exists).ok(), "has status");
     expect(exists, "has");
     exists = true;
-    expect(cat.HasTable("missing", &exists).ok(), "missing status");
+    expect(Access::HasTable(cat, "missing", &exists).ok(), "missing status");
     expect(!exists, "missing");
 
     reldb::TableSchema got;
-    expect(cat.GetTable("users", &got).ok(), "get");
+    expect(Access::GetTable(cat, "users", &got).ok(), "get");
     expect_eq(got.name(), std::string("users"), "name");
     expect_eq(got.num_columns(), static_cast<std::size_t>(2), "ncols");
     expect(got.columns()[0].primary_key, "pk");
 
-    expect(cat.GetTable("missing", &got).IsNotFound(), "missing get");
+    expect(Access::GetTable(cat, "missing", &got).IsNotFound(), "missing get");
 
     kv.reset();
     RemoveDirRecursive(dir);
@@ -62,11 +83,11 @@ TEST(reldb_catalog_reject_duplicate_and_invalid) {
     expect(kv != nullptr, "open");
 
     reldb::Catalog cat(kv);
-    expect(cat.CreateTable(UsersSchema()).ok(), "create");
-    expect(cat.CreateTable(UsersSchema()).IsInvalidArgument(), "dup");
+    expect(Access::CreateTable(cat, UsersSchema()).ok(), "create");
+    expect(Access::CreateTable(cat, UsersSchema()).IsInvalidArgument(), "dup");
 
     reldb::TableSchema bad("", {{"id", reldb::ColumnType::kInt64, true}});
-    expect(cat.CreateTable(bad).IsInvalidArgument(), "invalid schema");
+    expect(Access::CreateTable(cat, bad).IsInvalidArgument(), "invalid schema");
 
     kv.reset();
     RemoveDirRecursive(dir);
@@ -78,24 +99,24 @@ TEST(reldb_catalog_persists_across_reopen) {
         auto kv = OpenKv(dir);
         expect(kv != nullptr, "open");
         reldb::Catalog cat(kv);
-        expect(cat.CreateTable(UsersSchema()).ok(), "create");
+        expect(Access::CreateTable(cat, UsersSchema()).ok(), "create");
         reldb::TableSchema accounts("accounts", {
             {"uid", reldb::ColumnType::kString, true},
             {"bal", reldb::ColumnType::kInt64, false},
         });
-        expect(cat.CreateTable(accounts).ok(), "create accounts");
+        expect(Access::CreateTable(cat, accounts).ok(), "create accounts");
     }
 
     auto kv = OpenKv(dir);
     expect(kv != nullptr, "reopen");
     reldb::Catalog cat2(kv);
     reldb::TableSchema got;
-    expect(cat2.GetTable("users", &got).ok(), "users after reopen");
+    expect(Access::GetTable(cat2, "users", &got).ok(), "users after reopen");
     expect_eq(got.columns()[1].name, std::string("name"), "col");
-    expect(cat2.GetTable("accounts", &got).ok(), "accounts after reopen");
+    expect(Access::GetTable(cat2, "accounts", &got).ok(), "accounts after reopen");
     expect(got.columns()[0].type == reldb::ColumnType::kString, "uid type");
     bool exists = false;
-    expect(cat2.HasTable("users", &exists).ok(), "has status after reopen");
+    expect(Access::HasTable(cat2, "users", &exists).ok(), "has status after reopen");
     expect(exists, "has after reopen");
 
     // Key layout is stable for debugging / future tools.
