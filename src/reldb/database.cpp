@@ -126,7 +126,18 @@ lsmkv::Status Database::PersistOracles() {
 }
 
 lsmkv::Status Database::CreateTable(const TableSchema& schema) {
+    std::lock_guard<std::mutex> lock(mu_);
     return catalog_->CreateTable(schema);
+}
+
+lsmkv::Status Database::GetTable(const std::string& name, TableSchema* out) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return catalog_->GetTable(name, out);
+}
+
+lsmkv::Status Database::HasTable(const std::string& name, bool* exists) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return catalog_->HasTable(name, exists);
 }
 
 lsmkv::Status Database::GetTxnMeta(TxnId id, TxnMeta* out) const {

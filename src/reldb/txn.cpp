@@ -167,7 +167,8 @@ lsmkv::Status Transaction::Write(const std::string& table, const Value& pk, bool
 
 lsmkv::Status Transaction::Insert(const std::string& table, const Row& row) {
     TableSchema schema;
-    RELDB_RETURN_NOT_OK(db_->catalog()->GetTable(table, &schema));
+    // Database::GetTable takes mu_; Write takes mu_ again (non-nested).
+    RELDB_RETURN_NOT_OK(db_->GetTable(table, &schema));
     RELDB_RETURN_NOT_OK(row.ValidateAgainst(schema));
     Value pk;
     RELDB_RETURN_NOT_OK(row.PrimaryKey(schema, &pk));
@@ -176,7 +177,7 @@ lsmkv::Status Transaction::Insert(const std::string& table, const Row& row) {
 
 lsmkv::Status Transaction::Update(const std::string& table, const Row& row) {
     TableSchema schema;
-    RELDB_RETURN_NOT_OK(db_->catalog()->GetTable(table, &schema));
+    RELDB_RETURN_NOT_OK(db_->GetTable(table, &schema));
     RELDB_RETURN_NOT_OK(row.ValidateAgainst(schema));
     Value pk;
     RELDB_RETURN_NOT_OK(row.PrimaryKey(schema, &pk));
@@ -185,16 +186,19 @@ lsmkv::Status Transaction::Update(const std::string& table, const Row& row) {
 
 lsmkv::Status Transaction::Delete(const std::string& table, const Value& pk) {
     TableSchema schema;
-    RELDB_RETURN_NOT_OK(db_->catalog()->GetTable(table, &schema));
+    // Ensures the table exists under mu_ before Write (which also takes mu_).
+    RELDB_RETURN_NOT_OK(db_->GetTable(table, &schema));
     return Write(table, pk, /*is_delete=*/true, /*row=*/nullptr, /*is_insert=*/false);
 }
 
 lsmkv::Status Transaction::Get(const std::string& table, const Value& pk, Row* out) {
     if (finished_) return STATUS(InvalidArgument, "transaction finished");
     if (out == nullptr) return STATUS(InvalidArgument, "null out");
-    TableSchema schema;
-    RELDB_RETURN_NOT_OK(db_->catalog()->GetTable(table, &schema));
+    // Catalog + row read under one mu_ hold (avoids nested lock via GetTable).
     std::lock_guard<std::mutex> lock(db_->mu_);
+    TableSchema schema;
+    RELDB_RETURN_NOT_OK(db_->catalog_->GetTable(table, &schema));
+    (void)schema;  // existence check; row layout comes from stored payload
     return db_->store_->GetRow(
         table, pk, start_ts_, txn_id_,
         [this](TxnId id, TxnMeta* m) { return db_->GetTxnMeta(id, m); }, out);
@@ -273,7 +277,8 @@ lsmkv::Status Transaction::Scan(const std::string& table, const Value* start_pk,
         return STATUS(InvalidArgument, "out already holds a scan");
     }
     TableSchema schema;
-    RELDB_RETURN_NOT_OK(db_->catalog()->GetTable(table, &schema));
+    RELDB_RETURN_NOT_OK(db_->GetTable(table, &schema));
+    (void)schema;  // existence check; scan uses table name for key prefix
 
     const std::string prefix = "d/" + table + "/";
     std::string seek_target = prefix;

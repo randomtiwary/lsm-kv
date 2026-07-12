@@ -34,7 +34,14 @@ public:
 
     // DDL is NOT transactional in v1: applies immediately outside any user
     // Transaction (no snapshot, no Abort rollback). See docs/RELATIONAL.md.
+    // Takes mu_ for the Catalog call (Catalog never locks itself).
     lsmkv::Status CreateTable(const TableSchema& schema);
+
+    // Catalog lookup under mu_. Prefer these over catalog()->GetTable when
+    // multiple threads share a Database (SQL server, concurrent tests).
+    // const: only mu_ (mutable) and the catalog cache are touched.
+    lsmkv::Status GetTable(const std::string& name, TableSchema* out) const;
+    lsmkv::Status HasTable(const std::string& name, bool* exists) const;
 
     // Allocates a Transaction with a fresh txn_id and start_ts = last commit.
     // *txn must be empty (get() == nullptr); otherwise InvalidArgument.
@@ -42,6 +49,8 @@ public:
     // Transaction holds a shared_ptr to this Database.
     lsmkv::Status Begin(std::unique_ptr<Transaction>* txn);
 
+    // Raw Catalog pointer. Not thread-safe unless the caller holds mu_ (private)
+    // or fully serializes access. Prefer CreateTable / GetTable / HasTable.
     std::shared_ptr<Catalog> catalog() const { return catalog_; }
     std::shared_ptr<MvccStore> store() const { return store_; }
     std::shared_ptr<lsmkv::DB> kv() const { return kv_; }
@@ -66,7 +75,8 @@ private:
     lsmkv::Status RestoreHeads(const std::vector<TxnWrite>& writes);
     lsmkv::Status RestoreWrittenHeads(Transaction* txn);
 
-    std::mutex mu_;
+    // Mutable so const GetTable/HasTable can lock (catalog cache updates on miss).
+    mutable std::mutex mu_;
     std::shared_ptr<lsmkv::DB> kv_;
     std::shared_ptr<Catalog> catalog_;
     std::shared_ptr<MvccStore> store_;

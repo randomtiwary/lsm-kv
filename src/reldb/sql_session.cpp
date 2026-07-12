@@ -164,7 +164,7 @@ lsmkv::Status SqlSession::Execute(std::string_view sql, QueryResult& result) {
 
 lsmkv::Status SqlSession::LookupTable(const std::string& name, TableSchema* out) const {
     LSMKV_DCHECK(out != nullptr);
-    return db_->catalog()->GetTable(name, out);
+    return db_->GetTable(name, out);
 }
 
 lsmkv::Status SqlSession::RunStatement(Statement stmt, QueryResult& result) {
