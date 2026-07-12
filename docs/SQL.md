@@ -375,10 +375,11 @@ Dependency chain:
 
 ## Out of scope follow-ups
 
-- Joins and multi-table plans  
-- Aggregates and `GROUP BY`  
+See [ROADMAP_SERVER_DDL_AGG_JOIN.md](ROADMAP_SERVER_DDL_AGG_JOIN.md) for the ordered
+plan (SQL server → `DROP`/`ALTER` → aggregates → joins). Still out of that roadmap:
+
 - Prepared statements  
 - Secondary indexes  
-- Cost-based optimizer  
-- Merge `feature/sql-layer` → `main` (separate PR when stack is green)
+- Cost-based optimizer / join reordering  
+- Auth/TLS, Postgres wire protocol
 

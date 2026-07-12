@@ -222,6 +222,7 @@ tests/             Unit and integration tests
 docs/SQL.md        SQL dialect, plans, session behavior
 docs/RELATIONAL.md MVCC + snapshot isolation design
 docs/DESIGN.md     LSM storage design
+docs/ROADMAP_…     Next: SQL server, DROP/ALTER, aggregates, joins
 server/            Optional TCP KV server
 ```
 
