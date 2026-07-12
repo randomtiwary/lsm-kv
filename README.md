@@ -19,7 +19,8 @@ layers) fit together.
 
 **Not** a production Postgres/MySQL clone: no joins, aggregates, secondary indexes,
 or cost-based optimizer. See [docs/SQL.md](docs/SQL.md) and
-[docs/RELATIONAL.md](docs/RELATIONAL.md).
+[docs/RELATIONAL.md](docs/RELATIONAL.md). Planned next layers (SQL server, richer DDL,
+aggregates, joins): [docs/ROADMAP_SERVER_DDL_AGG_JOIN.md](docs/ROADMAP_SERVER_DDL_AGG_JOIN.md).
 
 ## Quick start
 
@@ -221,6 +222,7 @@ tests/             Unit and integration tests
 docs/SQL.md        SQL dialect, plans, session behavior
 docs/RELATIONAL.md MVCC + snapshot isolation design
 docs/DESIGN.md     LSM storage design
+docs/ROADMAP_…     Next: SQL server, DROP/ALTER, aggregates, joins
 server/            Optional TCP KV server
 ```
 
