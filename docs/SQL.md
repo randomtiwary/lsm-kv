@@ -1,6 +1,6 @@
 # SQL Layer on reldb
 
-**Status:** Planned (implementation on branch `feature/sql-layer`)  
+**Status:** Implemented on branch `feature/sql-layer` (see `reldb::SqlSession`, `reldb_sql_example`)  
 **Date:** 2026-07-11  
 **Language:** C++17  
 
