@@ -1,175 +1,86 @@
-# lsm-kv — Educational LSM-Tree Key-Value Store (C++)
+# lsm-kv — Educational Embedded SQL Database (C++)
 
-A small **embedded key-value storage engine** built around a Log-Structured Merge-tree (LSM), implemented from scratch in modern **C++17** with CMake.
+An educational **embedded SQL database** in modern **C++17**: tables, transactions
+with **MVCC** and **snapshot isolation**, a small **SQL dialect**, and an interactive
+shell — all built on a from-scratch **LSM-tree key-value** storage engine.
 
-This project prioritizes **clarity over performance**. Every component is intentionally simple so you can read, review, and modify it while learning how production engines (LevelDB, RocksDB, BadgerDB) are structured.
+Clarity over completeness. The goal is code you can read, review, and modify while
+learning how real systems (LevelDB/RocksDB-style storage + simple relational/SQL
+layers) fit together.
+
+## What you get
+
+| Layer | Capabilities |
+|-------|----------------|
+| **SQL** | `CREATE TABLE`, `INSERT` / `SELECT` / `UPDATE` / `DELETE`, `BEGIN` / `COMMIT` / `ABORT`, simple `WHERE` / `ORDER BY` / `LIMIT` |
+| **Relational (C++)** | Schemas, rows, `Transaction` with SI, point get + table scan |
+| **Storage (LSM KV)** | WAL, MemTable (SkipList), SSTables, flush/compaction, crash recovery |
+| **Tools** | Interactive SQL shell, demos, optional TCP server for raw KV |
+
+**Not** a production Postgres/MySQL clone: no joins, aggregates, secondary indexes,
+or cost-based optimizer. See [docs/SQL.md](docs/SQL.md) and
+[docs/RELATIONAL.md](docs/RELATIONAL.md).
+
+## Quick start
+
+```bash
+# Prerequisites: CMake ≥ 3.16, C++17 compiler; SQL shell also needs libreadline
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+
+# Interactive SQL (default DB dir: /tmp/reldb_sql_shell)
+./scripts/run_sql_shell.sh
+# or: ./scripts/run_sql_shell.sh --db /path/to/db
+```
+
+```text
+sql> CREATE TABLE users(id INT PRIMARY KEY, name TEXT, score INT);
+sql> BEGIN;
+sql> INSERT INTO users VALUES (1, 'ada', 10);
+sql> INSERT INTO users VALUES (2, 'bob', 30);
+sql> SELECT * FROM users WHERE id = 1;
+plan: PkPointGet
++----+------+-------+
+| id | name | score |
++----+------+-------+
+| 1  | ada  | 10    |
++----+------+-------+
+(1 row)
+sql> COMMIT;
+```
+
+Other demos:
+
+```bash
+./scripts/run_sql_example.sh   # scripted SQL walkthrough
+./scripts/run_example.sh       # raw LSM KV Put/Get demo
+```
 
 ## Architecture
 
 ```
-Put/Delete ──► WAL ──► MemTable (SkipList)
-                           │ flush
-                           ▼
-                     SSTable L0 (overlapping)
-                           │ compact
-                           ▼
-                     SSTable L1 (non-overlapping ranges)
-
-Get ──► MemTable ──► Immutable MemTable ──► L0 SSTables ──► L1 SSTables
+┌──────────────────────────────────────────────────────────┐
+│  SQL shell / SqlSession::Execute(sql)                    │
+├──────────────────────────────────────────────────────────┤
+│  Parser → bind → access path → volcano executors         │
+├──────────────────────────────────────────────────────────┤
+│  reldb::Database / Transaction  (MVCC + snapshot SI)     │
+├──────────────────────────────────────────────────────────┤
+│  lsmkv::DB  (WAL, MemTable, SSTables, compaction)        │
+└──────────────────────────────────────────────────────────┘
 ```
-
-| Component | Role |
-|-----------|------|
-| **Status / Slice** | Error reporting and non-owning byte views |
-| **SkipList** | Concurrent in-memory ordered map (`shared_mutex`) |
-| **MemTable** | SkipList wrapper with sequence numbers and tombstones |
-| **WAL** | Append-only write-ahead log for crash recovery |
-| **Block / SSTable** | Sorted on-disk tables with restart points and an index |
-| **Version / Manifest** | Tracks live SSTables across levels |
-| **DB** | Public `Open` / `Put` / `Get` / `Delete` / `Close` API with background flush & compaction |
-
-## Public API
-
-```cpp
-#include "lsmkv/db.hpp"
-
-lsmkv::Options options;
-options.create_if_missing = true;
-
-lsmkv::DB* db = nullptr;
-lsmkv::Status s = lsmkv::DB::Open(options, "/tmp/mydb", &db);
-s = db->Put(lsmkv::WriteOptions(), "hello", "world");
-
-std::string value;
-s = db->Get(lsmkv::ReadOptions(), "hello", &value);
-s = db->Delete(lsmkv::WriteOptions(), "hello");
-delete db;
-```
-
-## Multithreading
-
-- **Writes** are serialized by a single `std::mutex` (WAL + MemTable update are atomic w.r.t. other writers).
-- **Reads** use `std::shared_mutex` on the memtables and immutable snapshots of version metadata, so `Get` scales across threads.
-- A background thread performs MemTable flushes and L0→L1 compaction.
-
-## Build & Test
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-### Run examples
-
-Easiest path (configures CMake if needed, builds, runs):
-
-```bash
-./scripts/run_example.sh          # KV engine (lsmkv_example)
-./scripts/run_sql_example.sh      # SQL frontend (reldb_sql_example)
-```
-
-Manual equivalent:
-
-```bash
-cmake -S . -B build -DLSMKV_BUILD_EXAMPLES=ON
-cmake --build build --target lsmkv_example
-./build/lsmkv_example
-
-cmake --build build --target reldb_sql_example
-./build/reldb_sql_example
-```
-
-Requirements: CMake ≥ 3.16, a C++17 compiler (GCC/Clang).
-
-## TCP server
-
-A small line-oriented TCP front-end exposes `GET` / `SET` / `DEL` over the embedded engine (default port **7379**). Concurrent connections are capped (default **128**, override with `--max-clients`).
-
-```bash
-./scripts/run_server.sh --db /tmp/lsmkv_data --port 7379 --max-clients 128
-# or: cmake --build build --target lsmkv_server && ./build/lsmkv_server --db /tmp/lsmkv_data
-```
-
-Protocol (one command per line; keys/values must not contain newlines):
-
-| Request | Response |
-|---------|----------|
-| `PING` | `+PONG` |
-| `SET <key> <value>` | `+OK` |
-| `GET <key>` | `$N` then a line with `N` bytes of value, or `NOT_FOUND` if missing |
-| `DEL <key>` | `+OK` |
-| `QUIT` | `+OK` (then connection closes) |
-| errors | `-ERR <message>` |
-
-```bash
-printf 'SET hello world\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7379
-```
-
-### Docker
-
-Run two independent instances (separate data volumes, ports 7379 and 7380):
-
-```bash
-docker compose up --build
-printf 'SET hello from1\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7379
-printf 'SET hello from2\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7380
-```
-
-Single container:
-
-```bash
-docker build -t lsmkv-server .
-docker run --rm -p 7379:7379 -v lsmkv-data:/data lsmkv-server
-```
-
-## Project layout
-
-```
-include/lsmkv/   Public headers (KV engine)
-include/reldb/   Public headers (relational layer, MVCC + SI)
-src/             KV engine implementation
-src/reldb/       Relational layer implementation
-server/          TCP server (Server class + lsmkv_server main)
-tests/           Exhaustive unit + integration tests (incl. server)
-examples/        Minimal CLI example
-docs/DESIGN.md   KV design notes and PR roadmap
-docs/RELATIONAL.md  Relational / MVCC / snapshot-isolation design
-docs/SQL.md      SQL frontend (parser, plans, SqlSession)
-Dockerfile       Multi-stage image for the server
-docker-compose.yml  Two sample server instances
-```
-
-## Relational layer (MVCC + snapshot isolation)
-
-An educational **relational database** with **MVCC** storage and **snapshot isolation**
-sits on top of `lsmkv::DB` (see [docs/RELATIONAL.md](docs/RELATIONAL.md)). It does not
-change LSM internals.
-
-```cpp
-#include "reldb/database.h"
-#include "reldb/txn.h"
-
-std::shared_ptr<reldb::Database> db;
-reldb::Database::Open(options, "/tmp/reldb", &db);
-db->CreateTable(schema);
-
-std::unique_ptr<reldb::Transaction> txn;
-db->Begin(&txn);
-txn->Insert("users", row);
-txn->Get("users", pk, &row);
-txn->Commit();  // or Abort(); Status::Conflict on write-write conflicts
-```
-
-Guarantees: **snapshot isolation** with first-committer-wins. Tests document that SI
-still allows **write skew** (not full serializability). No secondary indexes.
 
 ### SQL frontend
 
-A small **SQL dialect** is available via `reldb::SqlSession` (design: [docs/SQL.md](docs/SQL.md)):
-`CREATE TABLE`, `INSERT` / `SELECT` / `UPDATE` / `DELETE`, `BEGIN` / `COMMIT` / `ABORT`,
-with a rule-based access path (`PkPointGet` vs scan+filter). DDL is non-transactional
-and is rejected while a SQL transaction is open. DML/SELECT without `BEGIN` use autocommit.
+`reldb::SqlSession` parses a small dialect, binds against the catalog, picks a simple
+access path (`PkPointGet` when `WHERE pk = const`, otherwise scan + residual filter),
+and runs volcano-style operators. Design notes: [docs/SQL.md](docs/SQL.md).
+
+- **DDL** (`CREATE TABLE`) is **non-transactional** and is **rejected** while a SQL
+  transaction is open.
+- **DML / SELECT** without `BEGIN` use **autocommit**.
+- `QueryResult.plan_tag` shows the chosen plan (useful for learning and tests).
 
 ```cpp
 #include "reldb/database.h"
@@ -188,32 +99,130 @@ session.Execute("SELECT * FROM users WHERE id = 1;", result);  // plan_tag: PkPo
 session.Execute("COMMIT;", result);
 ```
 
-Build and run the demo: `./scripts/run_sql_example.sh` (or target `reldb_sql_example`).
+### Relational API (C++, no SQL)
 
-Interactive shell (persistent DB under `/tmp/reldb_sql_shell` by default;
-Up/Down arrows recall the last 50 statements; requires `libreadline`):
+Same storage and isolation model, without the parser:
 
-```bash
-./scripts/run_sql_shell.sh
-./scripts/run_sql_shell.sh --db /path/to/db
-# then: CREATE TABLE t(id INT PRIMARY KEY); SELECT * FROM t;
+```cpp
+#include "reldb/database.h"
+#include "reldb/txn.h"
+
+std::shared_ptr<reldb::Database> db;
+reldb::Database::Open(options, "/tmp/reldb", &db);
+db->CreateTable(schema);
+
+std::unique_ptr<reldb::Transaction> txn;
+db->Begin(&txn);
+txn->Insert("users", row);
+txn->Get("users", pk, &row);
+txn->Scan("users", nullptr, nullptr, &scan);  // SI-visible row cursor
+txn->Commit();  // or Abort(); Status::Conflict on write-write conflicts
 ```
 
-## Implementation roadmap
+**Snapshot isolation** with first-committer-wins. SI still allows **write skew** (not
+full serializability) — intentional and covered by tests. No secondary indexes.
 
-Work is split into small, independently reviewable PRs (see [docs/DESIGN.md](docs/DESIGN.md)):
+### Storage engine (LSM key-value)
 
-1. CMake scaffold + CI + test harness
-2. Core types (`Status`, `Slice`, options)
-3. Concurrent `SkipList`
-4. `MemTable` (sequence numbers, tombstones)
-5. Write-ahead log
-6. Block + SSTable format
-7. Version set / manifest
-8. `DB` engine (Put/Get/Delete, flush, recovery)
-9. Compaction + multithreaded integration tests
-10. TCP server front-end
-11. Docker packaging for the server
+The relational layer persists through an educational LSM engine (`lsmkv::DB`). Details
+in [docs/DESIGN.md](docs/DESIGN.md).
+
+```
+Put/Delete ──► WAL ──► MemTable (SkipList)
+                           │ flush
+                           ▼
+                     SSTable L0 (overlapping)
+                           │ compact
+                           ▼
+                     SSTable L1 (non-overlapping ranges)
+
+Get ──► MemTable ──► Immutable MemTable ──► L0 ──► L1
+```
+
+| Component | Role |
+|-----------|------|
+| **Status / Slice** | Error reporting and non-owning byte views |
+| **SkipList** | Concurrent in-memory ordered map |
+| **MemTable** | Sequence numbers and tombstones |
+| **WAL** | Crash recovery |
+| **Block / SSTable** | Sorted on-disk tables |
+| **Version / Manifest** | Live file set across levels |
+| **DB** | `Put` / `Get` / `Delete` / `NewIterator`, flush & compaction |
+
+```cpp
+#include "lsmkv/db.h"
+
+lsmkv::Options options;
+options.create_if_missing = true;
+lsmkv::DB* db = nullptr;
+lsmkv::DB::Open(options, "/tmp/mydb", &db);
+db->Put(lsmkv::WriteOptions(), "hello", "world");
+std::string value;
+db->Get(lsmkv::ReadOptions(), "hello", &value);
+delete db;
+```
+
+**Concurrency (KV layer):** writes are serialized; reads use shared locks / snapshots;
+a background thread flushes and compacts.
+
+## Build & test
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+| Target / script | Purpose |
+|-----------------|---------|
+| `./scripts/run_sql_shell.sh` | Interactive SQL (needs **libreadline**) |
+| `./scripts/run_sql_example.sh` | Scripted SQL demo |
+| `./scripts/run_example.sh` | LSM KV Put/Get demo |
+| `reldb_example` | C++ transactional API demo |
+
+Requirements: CMake ≥ 3.16, C++17 (GCC/Clang). SQL shell: `libreadline-dev` (or equivalent).
+
+## Optional: TCP server (raw KV)
+
+Line-oriented TCP front-end for the **KV** engine only (`GET` / `SET` / `DEL`), not SQL.
+Default port **7379**.
+
+```bash
+./scripts/run_server.sh --db /tmp/lsmkv_data --port 7379 --max-clients 128
+printf 'SET hello world\nGET hello\nQUIT\n' | nc -q 1 127.0.0.1 7379
+```
+
+| Request | Response |
+|---------|----------|
+| `PING` | `+PONG` |
+| `SET <key> <value>` | `+OK` |
+| `GET <key>` | `$N` + value line, or `NOT_FOUND` |
+| `DEL <key>` | `+OK` |
+| `QUIT` | `+OK` (closes connection) |
+
+Docker:
+
+```bash
+docker compose up --build
+docker build -t lsmkv-server .
+docker run --rm -p 7379:7379 -v lsmkv-data:/data lsmkv-server
+```
+
+## Project layout
+
+```
+include/reldb/     Relational + SQL public headers (Database, SqlSession, …)
+include/lsmkv/     LSM KV engine public headers
+src/reldb/         MVCC, transactions, parser, executors, session
+src/               LSM engine implementation
+examples/          reldb_sql_shell, reldb_sql_example, reldb_example, lsmkv_example
+scripts/           run_sql_shell.sh, run_sql_example.sh, …
+tests/             Unit and integration tests
+docs/SQL.md        SQL dialect, plans, session behavior
+docs/RELATIONAL.md MVCC + snapshot isolation design
+docs/DESIGN.md     LSM storage design
+server/            Optional TCP KV server
+```
 
 ## License
 
