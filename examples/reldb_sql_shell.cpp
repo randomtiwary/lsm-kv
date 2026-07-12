@@ -4,6 +4,7 @@
 //
 // Type SQL terminated by ';'. Meta-commands: .help, .quit
 // Ctrl-C (SIGINT) exits the shell cleanly.
+// Up/down arrows recall the last 50 completed statements (GNU Readline).
 //
 #include <csignal>
 #include <cstdlib>
@@ -13,6 +14,9 @@
 #include <string>
 #include <vector>
 
+#include <readline/history.h>
+#include <readline/readline.h>
+
 #include "lsmkv/options.h"
 #include "lsmkv/status.h"
 #include "reldb/database.h"
@@ -21,6 +25,8 @@
 #include "reldb/types.h"
 
 namespace {
+
+constexpr int kMaxHistory = 50;
 
 // Set by SIGINT handler; checked in the main loop. sig_atomic_t is async-signal-safe.
 volatile std::sig_atomic_t g_got_sigint = 0;
@@ -37,6 +43,8 @@ void PrintHelp() {
     std::cout
         << "Commands:\n"
         << "  SQL statement ending with ';'   execute (multi-line ok)\n"
+        << "  Up/Down arrows                  previous/next statement (last " << kMaxHistory
+        << ")\n"
         << "  .help                           this help\n"
         << "  .quit / .exit / Ctrl-D          leave the shell\n"
         << "  Ctrl-C                          leave the shell\n"
@@ -158,6 +166,29 @@ bool IsMeta(const std::string& line) {
     return !line.empty() && line[0] == '.';
 }
 
+// Append a completed SQL statement to history (cap kMaxHistory, skip exact dups of last).
+void RememberStatement(const std::string& sql) {
+    const std::string t = Trim(sql);
+    if (t.empty()) return;
+    if (history_length > 0) {
+        HIST_ENTRY* last = history_get(history_base + history_length - 1);
+        if (last != nullptr && last->line != nullptr && t == last->line) return;
+    }
+    add_history(t.c_str());
+}
+
+// Read one input line with readline (Up/Down = history). Empty optional means EOF/SIGINT.
+bool ReadLine(const char* prompt, std::string* out) {
+    char* raw = readline(prompt);
+    if (raw == nullptr) {
+        // EOF or interrupted.
+        return false;
+    }
+    *out = raw;
+    std::free(raw);
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -184,23 +215,28 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Keep our SIGINT handler; do not let readline install its own.
+    rl_catch_signals = 0;
+    using_history();
+    stifle_history(kMaxHistory);
+
     // Install SIGINT handler so Ctrl-C exits cleanly instead of aborting mid-flight.
     // The default handler would kill the process without running SqlSession cleanup;
-    // with this handler, getline is interrupted and we fall through to a normal exit.
+    // with this handler, readline is interrupted and we fall through to a normal exit.
     std::signal(SIGINT, OnSigInt);
 
     reldb::SqlSession session(db);
     std::cout << "reldb SQL shell  db=" << db_path << "\n"
-              << "Type .help for help, .quit or Ctrl-C to exit. End SQL with ';'.\n";
+              << "Type .help for help, .quit or Ctrl-C to exit. End SQL with ';'.\n"
+              << "Up/Down arrows recall the last " << kMaxHistory << " statements.\n";
 
     std::string buffer;
     std::string line;
     while (!g_got_sigint) {
         const bool cont = !buffer.empty();
-        std::cout << (session.InTransaction() ? (cont ? "sql'*> " : "sql*> ")
-                                              : (cont ? "sql'> " : "sql> "));
-        std::cout.flush();
-        if (!std::getline(std::cin, line)) {
+        const char* prompt = session.InTransaction() ? (cont ? "sql'*> " : "sql*> ")
+                                                     : (cont ? "sql'> " : "sql> ");
+        if (!ReadLine(prompt, &line)) {
             // EOF (Ctrl-D) or interrupted by SIGINT.
             std::cout << "\n";
             break;
@@ -229,6 +265,8 @@ int main(int argc, char** argv) {
         buffer += line;
 
         if (!EndsWithStatementTerminator(buffer)) continue;
+
+        RememberStatement(buffer);
 
         reldb::QueryResult result;
         st = session.Execute(buffer, result);

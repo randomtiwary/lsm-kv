@@ -190,7 +190,8 @@ session.Execute("COMMIT;", result);
 
 Build and run the demo: `./scripts/run_sql_example.sh` (or target `reldb_sql_example`).
 
-Interactive shell (persistent DB under `/tmp/reldb_sql_shell` by default):
+Interactive shell (persistent DB under `/tmp/reldb_sql_shell` by default;
+Up/Down arrows recall the last 50 statements; requires `libreadline`):
 
 ```bash
 ./scripts/run_sql_shell.sh
