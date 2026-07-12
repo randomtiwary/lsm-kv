@@ -12,7 +12,7 @@
 int main() {
     lsmkv::Options opt;
     opt.create_if_missing = true;
-    std::unique_ptr<reldb::Database> db;
+    std::shared_ptr<reldb::Database> db;
     auto st = reldb::Database::Open(opt, "/tmp/reldb_example", &db);
     if (!st.ok()) {
         std::cerr << "open: " << st.ToString() << "\n";

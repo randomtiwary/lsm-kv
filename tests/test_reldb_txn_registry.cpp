@@ -17,10 +17,10 @@ reldb::TableSchema UsersSchema() {
     });
 }
 
-std::unique_ptr<reldb::Database> OpenDb(const std::string& dir) {
+std::shared_ptr<reldb::Database> OpenDb(const std::string& dir) {
     lsmkv::Options opt;
     opt.create_if_missing = true;
-    std::unique_ptr<reldb::Database> db;
+    std::shared_ptr<reldb::Database> db;
     if (!reldb::Database::Open(opt, dir, &db).ok()) return nullptr;
     return db;
 }
@@ -36,7 +36,7 @@ TEST(reldb_status_conflict) {
 TEST(reldb_txn_begin_commit_abort_registry) {
     auto dir = MakeTempDir("reldb_reg1");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -73,7 +73,7 @@ TEST(reldb_txn_registry_persists) {
     auto dir = MakeTempDir("reldb_reg2");
     reldb::TxnId id = 0;
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "begin");
@@ -81,7 +81,7 @@ TEST(reldb_txn_registry_persists) {
         EXPECT_OK(txn->Commit(), "commit");
     }
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "reopen");
         reldb::TxnMeta meta;
         EXPECT_OK(db->GetTxnMeta(id, &meta), "load");

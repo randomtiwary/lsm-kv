@@ -60,12 +60,13 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-### Run the example
+### Run examples
 
-Easiest path (configures CMake if needed, builds `lsmkv_example`, runs it):
+Easiest path (configures CMake if needed, builds, runs):
 
 ```bash
-./scripts/run_example.sh
+./scripts/run_example.sh          # KV engine (lsmkv_example)
+./scripts/run_sql_example.sh      # SQL frontend (reldb_sql_example)
 ```
 
 Manual equivalent:
@@ -74,6 +75,9 @@ Manual equivalent:
 cmake -S . -B build -DLSMKV_BUILD_EXAMPLES=ON
 cmake --build build --target lsmkv_example
 ./build/lsmkv_example
+
+cmake --build build --target reldb_sql_example
+./build/reldb_sql_example
 ```
 
 Requirements: CMake ≥ 3.16, a C++17 compiler (GCC/Clang).
@@ -131,6 +135,7 @@ tests/           Exhaustive unit + integration tests (incl. server)
 examples/        Minimal CLI example
 docs/DESIGN.md   KV design notes and PR roadmap
 docs/RELATIONAL.md  Relational / MVCC / snapshot-isolation design
+docs/SQL.md      SQL frontend (parser, plans, SqlSession)
 Dockerfile       Multi-stage image for the server
 docker-compose.yml  Two sample server instances
 ```
@@ -145,7 +150,7 @@ change LSM internals.
 #include "reldb/database.h"
 #include "reldb/txn.h"
 
-std::unique_ptr<reldb::Database> db;
+std::shared_ptr<reldb::Database> db;
 reldb::Database::Open(options, "/tmp/reldb", &db);
 db->CreateTable(schema);
 
@@ -157,8 +162,33 @@ txn->Commit();  // or Abort(); Status::Conflict on write-write conflicts
 ```
 
 Guarantees: **snapshot isolation** with first-committer-wins. Tests document that SI
-still allows **write skew** (not full serializability). Point lookups by primary key
-only in v1 (no SQL parser, no secondary indexes).
+still allows **write skew** (not full serializability). No secondary indexes.
+
+### SQL frontend
+
+A small **SQL dialect** is available via `reldb::SqlSession` (design: [docs/SQL.md](docs/SQL.md)):
+`CREATE TABLE`, `INSERT` / `SELECT` / `UPDATE` / `DELETE`, `BEGIN` / `COMMIT` / `ABORT`,
+with a rule-based access path (`PkPointGet` vs scan+filter). DDL is non-transactional
+and is rejected while a SQL transaction is open. DML/SELECT without `BEGIN` use autocommit.
+
+```cpp
+#include "reldb/database.h"
+#include "reldb/query_result.h"
+#include "reldb/sql_session.h"
+
+std::shared_ptr<reldb::Database> db;
+reldb::Database::Open(options, "/tmp/reldb_sql", &db);
+
+reldb::SqlSession session(db);
+reldb::QueryResult result;
+session.Execute("CREATE TABLE users(id INT PRIMARY KEY, name TEXT);", result);
+session.Execute("BEGIN;", result);
+session.Execute("INSERT INTO users(id, name) VALUES (1, 'ada');", result);
+session.Execute("SELECT * FROM users WHERE id = 1;", result);  // plan_tag: PkPointGet
+session.Execute("COMMIT;", result);
+```
+
+Build and run the demo: `./scripts/run_sql_example.sh` (or target `reldb_sql_example`).
 
 ## Implementation roadmap
 

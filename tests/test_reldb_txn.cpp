@@ -23,10 +23,10 @@ reldb::Row User(std::int64_t id, const std::string& name) {
     return reldb::Row({reldb::Value::Int64(id), reldb::Value::String(name)});
 }
 
-std::unique_ptr<reldb::Database> OpenDb(const std::string& dir) {
+std::shared_ptr<reldb::Database> OpenDb(const std::string& dir) {
     lsmkv::Options opt;
     opt.create_if_missing = true;
-    std::unique_ptr<reldb::Database> db;
+    std::shared_ptr<reldb::Database> db;
     if (!reldb::Database::Open(opt, dir, &db).ok()) return nullptr;
     return db;
 }
@@ -36,7 +36,7 @@ std::unique_ptr<reldb::Database> OpenDb(const std::string& dir) {
 TEST(reldb_txn_insert_get_commit) {
     auto dir = MakeTempDir("reldb_txn1");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -66,7 +66,7 @@ TEST(reldb_txn_insert_get_commit) {
 TEST(reldb_txn_abort_discards_writes) {
     auto dir = MakeTempDir("reldb_txn2");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -89,7 +89,7 @@ TEST(reldb_txn_abort_discards_writes) {
 TEST(reldb_txn_update_and_delete) {
     auto dir = MakeTempDir("reldb_txn3");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -132,7 +132,7 @@ TEST(reldb_txn_snapshot_isolation_read) {
     // T1 begins, T2 commits a change, T1 still sees the old snapshot.
     auto dir = MakeTempDir("reldb_txn4");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -172,7 +172,7 @@ TEST(reldb_txn_snapshot_isolation_read) {
 TEST(reldb_txn_write_write_conflict) {
     auto dir = MakeTempDir("reldb_txn5");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -206,7 +206,7 @@ TEST(reldb_txn_write_write_conflict) {
 TEST(reldb_txn_duplicate_pk) {
     auto dir = MakeTempDir("reldb_txn6");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -229,7 +229,7 @@ TEST(reldb_txn_duplicate_pk) {
 TEST(reldb_txn_persists_across_reopen) {
     auto dir = MakeTempDir("reldb_txn7");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
         std::unique_ptr<reldb::Transaction> txn;
@@ -238,7 +238,7 @@ TEST(reldb_txn_persists_across_reopen) {
         EXPECT_OK(txn->Commit(), "c");
     }
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "reopen");
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "b");
@@ -255,7 +255,7 @@ TEST(reldb_txn_persists_across_reopen) {
 TEST(reldb_txn_insert_then_delete_same_txn) {
     auto dir = MakeTempDir("reldb_txn8");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -281,7 +281,7 @@ TEST(reldb_txn_insert_then_delete_same_txn) {
 TEST(reldb_txn_early_write_write_conflict) {
     auto dir = MakeTempDir("reldb_txn_eww");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -311,7 +311,7 @@ TEST(reldb_txn_early_write_write_conflict) {
 TEST(reldb_txn_eager_write_visible_only_after_commit) {
     auto dir = MakeTempDir("reldb_txn_eager");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         EXPECT_OK(db->CreateTable(UsersSchema()), "create");
 
@@ -343,7 +343,7 @@ TEST(reldb_txn_eager_write_visible_only_after_commit) {
 TEST(reldb_txn_begin_rejects_non_empty_unique_ptr) {
     auto dir = MakeTempDir("reldb_txn_begin");
     {
-        std::unique_ptr<reldb::Database> db = OpenDb(dir);
+        std::shared_ptr<reldb::Database> db = OpenDb(dir);
         expect(db != nullptr, "open");
         std::unique_ptr<reldb::Transaction> txn;
         EXPECT_OK(db->Begin(&txn), "begin");
