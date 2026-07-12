@@ -12,7 +12,7 @@ the existing `lsmkv::DB` key-value engine. The layer provides:
 - Tables with named columns and a single primary key
 - Multi-version concurrency control (**MVCC**) for row storage
 - **Snapshot isolation (SI)** for transactions
-- A programmatic C++ API (SQL layer planned separately — see [SQL.md](SQL.md))
+- A programmatic C++ API (SQL frontend: see [SQL.md](SQL.md))
 
 Clarity beats performance. The design prefers explicit data structures and tests that
 teach *why* SI works the way it does (including what it does **not** prevent).
@@ -31,8 +31,8 @@ teach *why* SI works the way it does (including what it does **not** prevent).
 - Serializable isolation (SSI / true serializability)
 - Distributed transactions, 2PC, replication
 
-SQL, range scans, and a basic optimizer are **out of this document’s core stack** but
-planned on branch `feature/sql-layer` — see [SQL.md](SQL.md).
+SQL, range scans, and a basic optimizer are documented in [SQL.md](SQL.md)
+(implemented on branch `feature/sql-layer`).
 
 ## Layering
 
@@ -202,7 +202,7 @@ Commits are serialized for simplicity (educational correctness over throughput).
 
 Core stack (PRs 12–16) was developed on `feature/relational-db` and merged to `main`.
 SI concurrency tests and crash-safe commit recovery are on `main`.
-SQL / scan work continues on `feature/sql-layer` — see [SQL.md](SQL.md).
+SQL / scan work lives on `feature/sql-layer` — see [SQL.md](SQL.md).
 
 ### PR 12: Design + library scaffold
 - **Files:** `docs/RELATIONAL.md`, `docs/DESIGN.md` (pointer), CMake `src/reldb/`,
