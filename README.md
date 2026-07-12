@@ -190,6 +190,14 @@ session.Execute("COMMIT;", result);
 
 Build and run the demo: `./scripts/run_sql_example.sh` (or target `reldb_sql_example`).
 
+Interactive shell (persistent DB under `/tmp/reldb_sql_shell` by default):
+
+```bash
+./scripts/run_sql_shell.sh
+./scripts/run_sql_shell.sh --db /path/to/db
+# then: CREATE TABLE t(id INT PRIMARY KEY); SELECT * FROM t;
+```
+
 ## Implementation roadmap
 
 Work is split into small, independently reviewable PRs (see [docs/DESIGN.md](docs/DESIGN.md)):
