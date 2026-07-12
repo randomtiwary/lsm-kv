@@ -495,19 +495,19 @@ private:
     lsmkv::Status RejectUnsupportedStatementStart() {
         switch (lex_.current().kind) {
             case TokenKind::kJoin:
-                return lex_.Error("JOIN is not supported in v1");
+                return lex_.Error("JOIN is not supported");
             case TokenKind::kGroup:
-                return lex_.Error("GROUP BY is not supported in v1");
+                return lex_.Error("GROUP BY is not supported");
             case TokenKind::kHaving:
-                return lex_.Error("HAVING is not supported in v1");
+                return lex_.Error("HAVING is not supported");
             case TokenKind::kUnion:
-                return lex_.Error("UNION is not supported in v1");
+                return lex_.Error("UNION is not supported");
             case TokenKind::kIntersect:
-                return lex_.Error("INTERSECT is not supported in v1");
+                return lex_.Error("INTERSECT is not supported");
             case TokenKind::kExcept:
-                return lex_.Error("EXCEPT is not supported in v1");
+                return lex_.Error("EXCEPT is not supported");
             case TokenKind::kDistinct:
-                return lex_.Error("DISTINCT is not supported in v1");
+                return lex_.Error("DISTINCT is not supported");
             default:
                 return STATUS(OK);
         }
@@ -614,7 +614,7 @@ private:
         RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kRParen, "')'"));
         // Reject multi-row: VALUES (...), (...)
         if (lex_.Check(TokenKind::kComma)) {
-            return lex_.Error("multi-row INSERT is not supported in v1");
+            return lex_.Error("multi-row INSERT is not supported");
         }
         if (!stmt.column_names.empty() && stmt.column_names.size() != stmt.values.size()) {
             return lex_.Error("INSERT column count does not match VALUES count");
@@ -626,7 +626,7 @@ private:
     lsmkv::Status ParseSelect(Statement* out) {
         lex_.Advance();  // SELECT
         if (lex_.Check(TokenKind::kDistinct)) {
-            return lex_.Error("SELECT DISTINCT is not supported in v1");
+            return lex_.Error("SELECT DISTINCT is not supported");
         }
         SelectStmt stmt;
         if (lex_.Match(TokenKind::kStar)) {
@@ -638,9 +638,9 @@ private:
                 }
                 std::unique_ptr<Expr> e;
                 RELDB_RETURN_NOT_OK(ParseExpr(&e));
-                // Optional AS alias rejected (v1: no AS for select list).
+                // Optional AS alias is not supported.
                 if (lex_.Check(TokenKind::kAs)) {
-                    return lex_.Error("AS aliases are not supported in v1");
+                    return lex_.Error("AS aliases are not supported");
                 }
                 stmt.select_list.push_back(std::move(e));
                 if (lex_.Match(TokenKind::kComma)) continue;
@@ -652,22 +652,22 @@ private:
         }
         RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kFrom, "FROM"));
         if (lex_.Check(TokenKind::kLParen)) {
-            return lex_.Error("subqueries are not supported in v1");
+            return lex_.Error("subqueries are not supported");
         }
         RELDB_RETURN_NOT_OK(ParseIdent(&stmt.table_name));
         // Reject JOIN after table.
         if (lex_.Check(TokenKind::kJoin) || lex_.Check(TokenKind::kComma)) {
-            return lex_.Error("joins are not supported in v1");
+            return lex_.Error("joins are not supported");
         }
 
         if (lex_.Match(TokenKind::kWhere)) {
             RELDB_RETURN_NOT_OK(ParseExpr(&stmt.where));
         }
         if (lex_.Match(TokenKind::kGroup)) {
-            return lex_.Error("GROUP BY is not supported in v1");
+            return lex_.Error("GROUP BY is not supported");
         }
         if (lex_.Match(TokenKind::kHaving)) {
-            return lex_.Error("HAVING is not supported in v1");
+            return lex_.Error("HAVING is not supported");
         }
         if (lex_.Match(TokenKind::kOrder)) {
             RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kBy, "BY"));
@@ -699,7 +699,7 @@ private:
         // Trailing unsupported set ops
         if (lex_.Check(TokenKind::kUnion) || lex_.Check(TokenKind::kIntersect) ||
             lex_.Check(TokenKind::kExcept)) {
-            return lex_.Error("set operations are not supported in v1");
+            return lex_.Error("set operations are not supported");
         }
         *out = std::move(stmt);
         return STATUS(OK);
@@ -748,7 +748,7 @@ private:
             lex_.Advance();
             return STATUS(OK);
         }
-        // Allow some keywords as identifiers? SQL often allows — for v1 only kIdent.
+        // Only bare identifiers (kIdent); reserved keywords are not allowed as names.
         return lex_.Error(std::string("expected identifier, got ") +
                           TokenKindName(lex_.current().kind));
     }
