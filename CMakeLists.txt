@@ -43,6 +43,20 @@ if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/reldb_s
     target_link_libraries(reldb_sql_example PRIVATE lsmkv_lib)
 endif()
 
+if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/reldb_sql_shell.cpp")
+    add_executable(reldb_sql_shell examples/reldb_sql_shell.cpp)
+    target_link_libraries(reldb_sql_shell PRIVATE lsmkv_lib)
+    # GNU Readline for line editing and statement history (Up/Down).
+    find_path(READLINE_INCLUDE_DIR readline/readline.h)
+    find_library(READLINE_LIBRARY readline)
+    if(NOT READLINE_INCLUDE_DIR OR NOT READLINE_LIBRARY)
+        message(FATAL_ERROR
+            "reldb_sql_shell requires GNU Readline (install libreadline-dev)")
+    endif()
+    target_include_directories(reldb_sql_shell PRIVATE ${READLINE_INCLUDE_DIR})
+    target_link_libraries(reldb_sql_shell PRIVATE ${READLINE_LIBRARY})
+endif()
+
 # Server library is built when the binary and/or tests need it.
 set(LSMKV_NEED_SERVER_LIB OFF)
 if(LSMKV_BUILD_SERVER OR LSMKV_BUILD_TESTS)
