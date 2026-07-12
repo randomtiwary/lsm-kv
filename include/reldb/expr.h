@@ -72,6 +72,15 @@ public:
     // Example: And(Compare(Eq, Column(id), Literal(1)), Column(active))
     std::string ToString() const;
 
+    // Read-only tree inspection (optimizer / binder). Valid only for matching kind().
+    const Value& literal() const { return literal_; }
+    const std::string& column_name() const { return column_name_; }
+    int column_index() const { return column_index_; }
+    CmpOp cmp_op() const { return cmp_op_; }
+    LogicOp logic_op() const { return logic_op_; }
+    const Expr* left() const { return left_.get(); }
+    const Expr* right() const { return right_.get(); }
+
     // Resolve column names to indices for schema. Safe to call more than once.
     lsmkv::Status Bind(const TableSchema& schema);
 
