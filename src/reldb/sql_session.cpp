@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "reldb/executor.h"
+#include "lsmkv/debug.h"
 #include "reldb/macros.h"
 #include "reldb/sql_parser.h"
 #include "reldb/types.h"
@@ -145,10 +146,12 @@ private:
     bool active_ = false;
 };
 
-SqlSession::SqlSession(std::shared_ptr<Database> db) : db_(std::move(db)) {}
+SqlSession::SqlSession(std::shared_ptr<Database> db) : db_(std::move(db)) {
+    LSMKV_DCHECK(db_ != nullptr);
+}
 
 lsmkv::Status SqlSession::Execute(std::string_view sql, QueryResult& result) {
-    if (db_ == nullptr) return STATUS(InvalidArgument, "null database");
+    LSMKV_DCHECK(db_ != nullptr);
     result.Clear();
     std::vector<Statement> stmts;
     RELDB_RETURN_NOT_OK(ParseScript(sql, &stmts));
@@ -160,7 +163,7 @@ lsmkv::Status SqlSession::Execute(std::string_view sql, QueryResult& result) {
 }
 
 lsmkv::Status SqlSession::LookupTable(const std::string& name, TableSchema* out) const {
-    if (out == nullptr) return STATUS(InvalidArgument, "null schema out");
+    LSMKV_DCHECK(out != nullptr);
     return db_->catalog()->GetTable(name, out);
 }
 
@@ -191,9 +194,7 @@ lsmkv::Status SqlSession::RunStatement(Statement stmt, QueryResult& result) {
 
 lsmkv::Status SqlSession::RunBegin(QueryResult& result) {
     result.Clear();
-    if (txn_ != nullptr) {
-        return STATUS(InvalidArgument, "already in a transaction");
-    }
+    RELDB_FAIL_IF(txn_ != nullptr, InvalidArgument, "already in a transaction");
     RELDB_RETURN_NOT_OK(db_->Begin(&txn_));
     auto_txn_ = false;
     return STATUS(OK);
@@ -201,9 +202,7 @@ lsmkv::Status SqlSession::RunBegin(QueryResult& result) {
 
 lsmkv::Status SqlSession::RunCommit(QueryResult& result) {
     result.Clear();
-    if (txn_ == nullptr) {
-        return STATUS(InvalidArgument, "not in a transaction");
-    }
+    RELDB_FAIL_IF_NOT_IN_TRANSACTION(txn_);
     auto_txn_ = false;
     const auto st = txn_->Commit();
     txn_.reset();
@@ -212,9 +211,7 @@ lsmkv::Status SqlSession::RunCommit(QueryResult& result) {
 
 lsmkv::Status SqlSession::RunAbort(QueryResult& result) {
     result.Clear();
-    if (txn_ == nullptr) {
-        return STATUS(InvalidArgument, "not in a transaction");
-    }
+    RELDB_FAIL_IF_NOT_IN_TRANSACTION(txn_);
     auto_txn_ = false;
     const auto st = txn_->Abort();
     txn_.reset();
@@ -223,9 +220,7 @@ lsmkv::Status SqlSession::RunAbort(QueryResult& result) {
 
 lsmkv::Status SqlSession::RunCreateTable(const CreateTableStmt& stmt, QueryResult& result) {
     result.Clear();
-    if (InTransaction()) {
-        return STATUS(InvalidArgument, "DDL is not allowed inside a transaction");
-    }
+    RELDB_FAIL_IF(InTransaction(), InvalidArgument, "DDL is not allowed inside a transaction");
     std::vector<ColumnDef> cols;
     cols.reserve(stmt.columns.size());
     for (const auto& c : stmt.columns) {
@@ -243,33 +238,25 @@ lsmkv::Status SqlSession::RunInsert(InsertStmt stmt, QueryResult& result) {
 
     Row row;
     if (stmt.column_names.empty()) {
-        if (stmt.values.size() != schema.num_columns()) {
-            return STATUS(InvalidArgument, "INSERT value count does not match table width");
-        }
+        RELDB_FAIL_IF(stmt.values.size() != schema.num_columns(), InvalidArgument,
+                      "INSERT value count does not match table width");
         row = Row(std::move(stmt.values));
     } else {
-        if (stmt.column_names.size() != stmt.values.size()) {
-            return STATUS(InvalidArgument, "INSERT column count does not match VALUES count");
-        }
+        RELDB_FAIL_IF(stmt.column_names.size() != stmt.values.size(), InvalidArgument,
+                      "INSERT column count does not match VALUES count");
         std::vector<Value> cells(schema.num_columns(), Value::Null());
         std::vector<bool> set(schema.num_columns(), false);
         for (std::size_t i = 0; i < stmt.column_names.size(); ++i) {
             const int idx = schema.ColumnIndex(stmt.column_names[i]);
-            if (idx < 0) {
-                return STATUS(InvalidArgument, "unknown column: " + stmt.column_names[i]);
-            }
+            RELDB_FAIL_IF(idx < 0, InvalidArgument, "unknown column: " + stmt.column_names[i]);
             const auto ui = static_cast<std::size_t>(idx);
-            if (set[ui]) {
-                return STATUS(InvalidArgument, "duplicate column in INSERT: " + stmt.column_names[i]);
-            }
+            RELDB_FAIL_IF(set[ui], InvalidArgument, "duplicate column in INSERT: " + stmt.column_names[i]);
             cells[ui] = std::move(stmt.values[i]);
             set[ui] = true;
         }
         for (std::size_t i = 0; i < set.size(); ++i) {
-            if (!set[i]) {
-                return STATUS(InvalidArgument,
-                              "missing column in INSERT: " + schema.columns()[i].name);
-            }
+            RELDB_FAIL_IF(!set[i], InvalidArgument,
+                          "missing column in INSERT: " + schema.columns()[i].name);
         }
         row = Row(std::move(cells));
     }
@@ -284,13 +271,10 @@ lsmkv::Status SqlSession::RunInsert(InsertStmt stmt, QueryResult& result) {
 lsmkv::Status SqlSession::PlanAccess(Transaction& txn, const TableSchema& schema,
                                      std::unique_ptr<Expr> where,
                                      std::unique_ptr<Executor>* out, std::string* access_tag) {
-    if (out == nullptr || access_tag == nullptr) {
-        return STATUS(InvalidArgument, "null plan out");
-    }
+    LSMKV_DCHECK(out != nullptr);
+    LSMKV_DCHECK(access_tag != nullptr);
     const std::string pk_name = PkColumnName(schema);
-    if (pk_name.empty()) {
-        return STATUS(InvalidArgument, "table has no primary key");
-    }
+    RELDB_FAIL_IF(pk_name.empty(), InvalidArgument, "table has no primary key");
 
     if (where != nullptr) {
         Value pk;
@@ -344,16 +328,14 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
     // Projection names (for ORDER BY after Project).
     std::vector<std::string> out_names;
     if (!stmt.select_star) {
-        if (stmt.select_list.empty()) {
-            return auto_txn.Complete(STATUS(InvalidArgument, "empty SELECT list"));
-        }
+        RELDB_RETURN_IF(stmt.select_list.empty(),
+                        auto_txn.Complete(STATUS(InvalidArgument, "empty SELECT list")));
         std::vector<Projection> projs;
         projs.reserve(stmt.select_list.size());
         out_names.reserve(stmt.select_list.size());
         for (auto& e : stmt.select_list) {
-            if (e == nullptr) {
-                return auto_txn.Complete(STATUS(InvalidArgument, "null select expression"));
-            }
+            RELDB_RETURN_IF(e == nullptr,
+                            auto_txn.Complete(STATUS(InvalidArgument, "null select expression")));
             std::string name =
                 (e->kind() == Expr::Kind::kColumn) ? e->column_name() : e->ToString();
             RELDB_RETURN_NOT_OK(e->Bind(schema));
@@ -378,19 +360,17 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
                     break;
                 }
             }
-            if (idx < 0) {
-                return auto_txn.Complete(
-                    STATUS(InvalidArgument, "unknown ORDER BY column: " + o.column_name));
-            }
+            RELDB_RETURN_IF(idx < 0,
+                            auto_txn.Complete(STATUS(InvalidArgument,
+                                                     "unknown ORDER BY column: " + o.column_name)));
             keys.push_back(SortKey{idx, o.ascending});
         }
         plan = std::make_unique<SortExecutor>(std::move(plan), std::move(keys));
     }
 
     if (stmt.has_limit) {
-        if (stmt.limit < 0) {
-            return auto_txn.Complete(STATUS(InvalidArgument, "LIMIT must be non-negative"));
-        }
+        RELDB_RETURN_IF(stmt.limit < 0,
+                        auto_txn.Complete(STATUS(InvalidArgument, "LIMIT must be non-negative")));
         plan = std::make_unique<LimitExecutor>(std::move(plan),
                                                static_cast<std::uint64_t>(stmt.limit));
     }
@@ -406,12 +386,8 @@ lsmkv::Status SqlSession::RunUpdate(UpdateStmt stmt, QueryResult& result) {
     assigns.reserve(stmt.sets.size());
     for (auto& a : stmt.sets) {
         const int idx = schema.ColumnIndex(a.column_name);
-        if (idx < 0) {
-            return STATUS(InvalidArgument, "unknown column: " + a.column_name);
-        }
-        if (a.value == nullptr) {
-            return STATUS(InvalidArgument, "null assignment expression");
-        }
+        RELDB_FAIL_IF(idx < 0, InvalidArgument, "unknown column: " + a.column_name);
+        RELDB_FAIL_IF(a.value == nullptr, InvalidArgument, "null assignment expression");
         RELDB_RETURN_NOT_OK(a.value->Bind(schema));
         assigns.push_back(Assignment{idx, std::move(a.value)});
     }
