@@ -233,15 +233,17 @@ int main(int argc, char** argv) {
         reldb::QueryResult result;
         st = session.Execute(buffer, result);
         buffer.clear();
+        // Prefer reporting the statement result before honoring Ctrl-C so the
+        // user still sees ERROR / rows if Execute finished (or failed) first.
+        if (!st.ok()) {
+            std::cerr << "ERROR: " << st.ToString() << "\n";
+        } else {
+            PrintResult(result);
+        }
         if (g_got_sigint) {
             std::cout << "\n";
             break;
         }
-        if (!st.ok()) {
-            std::cerr << "ERROR: " << st.ToString() << "\n";
-            continue;
-        }
-        PrintResult(result);
     }
 
     if (g_got_sigint) {
