@@ -3,7 +3,9 @@
 //   reldb_sql_shell [--db PATH]
 //
 // Type SQL terminated by ';'. Meta-commands: .help, .quit
+// Ctrl-C (SIGINT) exits the shell cleanly.
 //
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -20,6 +22,11 @@
 
 namespace {
 
+// Set by SIGINT handler; checked in the main loop. sig_atomic_t is async-signal-safe.
+volatile std::sig_atomic_t g_got_sigint = 0;
+
+void OnSigInt(int /*signo*/) { g_got_sigint = 1; }
+
 void PrintUsage(const char* argv0) {
     std::cerr << "Usage: " << argv0 << " [--db PATH]\n"
               << "  Interactive SQL shell for reldb.\n"
@@ -32,6 +39,7 @@ void PrintHelp() {
         << "  SQL statement ending with ';'   execute (multi-line ok)\n"
         << "  .help                           this help\n"
         << "  .quit / .exit / Ctrl-D          leave the shell\n"
+        << "  Ctrl-C                          leave the shell\n"
         << "\n"
         << "SQL (subset): CREATE TABLE, INSERT, SELECT, UPDATE, DELETE,\n"
         << "  BEGIN, COMMIT, ABORT/ROLLBACK.\n"
@@ -176,18 +184,28 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Install SIGINT handler so Ctrl-C exits cleanly instead of aborting mid-flight.
+    // The default handler would kill the process without running SqlSession cleanup;
+    // with this handler, getline is interrupted and we fall through to a normal exit.
+    std::signal(SIGINT, OnSigInt);
+
     reldb::SqlSession session(db);
     std::cout << "reldb SQL shell  db=" << db_path << "\n"
-              << "Type .help for help, .quit to exit. End SQL with ';'.\n";
+              << "Type .help for help, .quit or Ctrl-C to exit. End SQL with ';'.\n";
 
     std::string buffer;
     std::string line;
-    while (true) {
+    while (!g_got_sigint) {
         const bool cont = !buffer.empty();
         std::cout << (session.InTransaction() ? (cont ? "sql'*> " : "sql*> ")
                                               : (cont ? "sql'> " : "sql> "));
         std::cout.flush();
         if (!std::getline(std::cin, line)) {
+            // EOF (Ctrl-D) or interrupted by SIGINT.
+            std::cout << "\n";
+            break;
+        }
+        if (g_got_sigint) {
             std::cout << "\n";
             break;
         }
@@ -215,6 +233,10 @@ int main(int argc, char** argv) {
         reldb::QueryResult result;
         st = session.Execute(buffer, result);
         buffer.clear();
+        if (g_got_sigint) {
+            std::cout << "\n";
+            break;
+        }
         if (!st.ok()) {
             std::cerr << "ERROR: " << st.ToString() << "\n";
             continue;
@@ -222,6 +244,9 @@ int main(int argc, char** argv) {
         PrintResult(result);
     }
 
+    if (g_got_sigint) {
+        std::cerr << "Interrupted.\n";
+    }
     if (session.InTransaction()) {
         std::cerr << "warning: open transaction left uncommitted (will abort on exit)\n";
     }
