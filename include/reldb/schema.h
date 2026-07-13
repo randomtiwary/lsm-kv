@@ -37,6 +37,8 @@ public:
     lsmkv::Status Validate() const;
 
     // Binary encode / decode for catalog persistence.
+    // Encode always writes versioned layout: magic "SCH\x01" + body + per-column flags.
+    // Decode: magic-first versioned; else legacy (pre-B1) fully consumed.
     std::string Encode() const;
     static lsmkv::Status Decode(const std::string& bytes, TableSchema* out);
 
