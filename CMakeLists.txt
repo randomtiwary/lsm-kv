@@ -83,8 +83,7 @@ if(LSMKV_BUILD_SERVER AND TARGET lsmkv_server_lib)
     install(TARGETS lsmkv_server RUNTIME DESTINATION bin)
 endif()
 
-# SQL protocol codec + connection request handler (no TCP listen yet).
-# Shared by future reldb_sql_server / CLI / tests.
+# SQL protocol codec + SqlHandleLine + SqlServer TCP (reldb_sql_server).
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sql_server/protocol.cpp")
     set(RELDB_SQL_SERVER_SOURCES sql_server/protocol.cpp)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sql_server/sql_server.cpp")
@@ -96,6 +95,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sql_server/protocol.cpp")
     target_compile_options(reldb_sql_protocol_lib PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     )
+endif()
+
+if(LSMKV_BUILD_SERVER AND TARGET reldb_sql_protocol_lib
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sql_server/main.cpp")
+    add_executable(reldb_sql_server sql_server/main.cpp)
+    target_link_libraries(reldb_sql_server PRIVATE reldb_sql_protocol_lib)
+    target_compile_options(reldb_sql_server PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    )
+    install(TARGETS reldb_sql_server RUNTIME DESTINATION bin)
 endif()
 
 if(LSMKV_BUILD_TESTS)

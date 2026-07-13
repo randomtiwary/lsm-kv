@@ -15,7 +15,7 @@ layers) fit together.
 | **SQL** | `CREATE TABLE`, `INSERT` / `SELECT` / `UPDATE` / `DELETE`, `BEGIN` / `COMMIT` / `ABORT`, simple `WHERE` / `ORDER BY` / `LIMIT` |
 | **Relational (C++)** | Schemas, rows, `Transaction` with SI, point get + table scan |
 | **Storage (LSM KV)** | WAL, MemTable (SkipList), SSTables, flush/compaction, crash recovery |
-| **Tools** | Interactive SQL shell, demos, optional TCP server for raw KV |
+| **Tools** | Interactive SQL shell, SQL TCP server (`reldb_sql_server`), demos, optional raw-KV TCP server |
 
 **Not** a production Postgres/MySQL clone: no joins, aggregates, secondary indexes,
 or cost-based optimizer. See [docs/SQL.md](docs/SQL.md) and
@@ -30,9 +30,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 
-# Interactive SQL (default DB dir: /tmp/reldb_sql_shell)
+# Interactive SQL shell (default DB dir: /tmp/reldb_sql_shell)
 ./scripts/run_sql_shell.sh
 # or: ./scripts/run_sql_shell.sh --db /path/to/db
+
+# Networked SQL server (default 127.0.0.1:7380, no auth)
+./scripts/run_sql_server.sh
+# or: ./scripts/run_sql_server.sh --db /path/to/db --port 7380
 ```
 
 ```text
@@ -176,7 +180,8 @@ ctest --test-dir build --output-on-failure
 
 | Target / script | Purpose |
 |-----------------|---------|
-| `./scripts/run_sql_shell.sh` | Interactive SQL (needs **libreadline**) |
+| `./scripts/run_sql_shell.sh` | Interactive SQL shell (needs **libreadline**) |
+| `./scripts/run_sql_server.sh` | SQL TCP server (default `127.0.0.1:7380`) |
 | `./scripts/run_sql_example.sh` | Scripted SQL demo |
 | `./scripts/run_example.sh` | LSM KV Put/Get demo |
 | `reldb_example` | C++ transactional API demo |
@@ -217,7 +222,7 @@ include/lsmkv/     LSM KV engine public headers
 src/reldb/         MVCC, transactions, parser, executors, session
 src/               LSM engine implementation
 examples/          reldb_sql_shell, reldb_sql_example, reldb_example, lsmkv_example
-scripts/           run_sql_shell.sh, run_sql_example.sh, …
+scripts/           run_sql_shell.sh, run_sql_server.sh, …
 tests/             Unit and integration tests
 docs/SQL.md        SQL dialect, plans, session behavior
 docs/RELATIONAL.md MVCC + snapshot isolation design
