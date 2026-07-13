@@ -255,11 +255,28 @@ TEST(sql_server_mt_concurrent_create_and_select) {
             std::string r;
             const std::string sql =
                 "CREATE TABLE t" + std::to_string(i) + "(id INT PRIMARY KEY, name TEXT);";
-            if (!RoundTrip(fd, sql, &r, std::chrono::seconds(5))) {
+            // Autocommit SELECT briefly elevates open_txn_count_ and can reject
+            // DDL. Retry until CREATE succeeds or we give up.
+            bool ok = false;
+            for (int attempt = 0; attempt < 200; ++attempt) {
+                if (!RoundTrip(fd, sql, &r, std::chrono::seconds(5))) {
+                    errors.fetch_add(1);
+                    break;
+                }
+                if (StartsWith(r, "+OK")) {
+                    ok = true;
+                    create_ok.fetch_add(1);
+                    break;
+                }
+                if (r.find("DDL requires no open transactions") != std::string::npos) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    continue;
+                }
                 errors.fetch_add(1);
-            } else if (StartsWith(r, "+OK")) {
-                create_ok.fetch_add(1);
-            } else {
+                break;
+            }
+            if (!ok && errors.load() == 0) {
+                // Timed out retrying only open-txn gate.
                 errors.fetch_add(1);
             }
             (void)RoundTrip(fd, "QUIT", &r, std::chrono::seconds(2));

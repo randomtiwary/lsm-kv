@@ -3,9 +3,11 @@
 #include <mutex>
 #include <shared_mutex>
 
+#include "lsmkv/debug.h"
 #include "lsmkv/encoding.h"
 #include "lsmkv/slice.h"
 #include "reldb/macros.h"
+#include "reldb/scoped_util.h"
 #include "reldb/txn.h"
 
 namespace reldb {
@@ -130,7 +132,34 @@ lsmkv::Status Database::PersistOracles() {
 
 lsmkv::Status Database::CreateTable(const TableSchema& schema) {
     std::unique_lock<std::shared_mutex> lock(mu_);
+    if (open_txn_count_ != 0) {
+        return STATUS(InvalidArgument, "DDL requires no open transactions");
+    }
+    if (ddl_in_progress_) {
+        return STATUS(InvalidArgument, "DDL in progress");
+    }
+    ddl_in_progress_ = true;
+    ScopedBool clear_ddl(ddl_in_progress_, false);
     return catalog_->CreateTable(schema);
+}
+
+std::size_t Database::open_txn_count() const {
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    return open_txn_count_;
+}
+
+void Database::TEST_SetDdlInProgress(bool v) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    ddl_in_progress_ = v;
+}
+
+void Database::MarkTxnFinishedLocked(Transaction* txn) {
+    // Caller holds mu_. Exactly one finish transition per live txn.
+    LSMKV_DCHECK(txn != nullptr);
+    LSMKV_DCHECK(!txn->finished_);
+    LSMKV_DCHECK(open_txn_count_ > 0);
+    txn->finished_ = true;
+    --open_txn_count_;
 }
 
 lsmkv::Status Database::GetTable(const std::string& name, TableSchema* out) const {
@@ -186,6 +215,9 @@ lsmkv::Status Database::Begin(std::unique_ptr<Transaction>* txn) {
         return STATUS(InvalidArgument, "txn already holds a transaction");
     }
     std::unique_lock<std::shared_mutex> lock(mu_);
+    if (ddl_in_progress_) {
+        return STATUS(InvalidArgument, "DDL in progress");
+    }
     const TxnId id = next_txn_id_++;
     const Timestamp start_ts = next_ts_ - 1;
     RELDB_RETURN_NOT_OK(PersistOracles());
@@ -195,6 +227,7 @@ lsmkv::Status Database::Begin(std::unique_ptr<Transaction>* txn) {
     RELDB_RETURN_NOT_OK(PutTxnMeta(id, meta));
     *txn = std::unique_ptr<Transaction>(
         new Transaction(shared_from_this(), id, start_ts));
+    ++open_txn_count_;
     return STATUS(OK);
 }
 
@@ -315,7 +348,7 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
             TxnMeta aborted;
             aborted.state = TxnState::kAborted;
             RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, aborted));
-            txn->finished_ = true;
+            MarkTxnFinishedLocked(txn);
             return STATUS(Conflict, "write-write conflict: head moved");
         }
 
@@ -333,7 +366,7 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
                 TxnMeta aborted;
                 aborted.state = TxnState::kAborted;
                 RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, aborted));
-                txn->finished_ = true;
+                MarkTxnFinishedLocked(txn);
                 return STATUS(Conflict, "write-write conflict: key committed after snapshot");
             }
             if (!st.ok() && !st.IsNotFound()) return st;
@@ -364,7 +397,7 @@ lsmkv::Status Database::CommitTransaction(Transaction* txn) {
     RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, meta));
     RELDB_RETURN_NOT_OK(PersistOracles());
 
-    txn->finished_ = true;
+    MarkTxnFinishedLocked(txn);
     return STATUS(OK);
 }
 
@@ -376,7 +409,7 @@ lsmkv::Status Database::AbortTransaction(Transaction* txn) {
     meta.state = TxnState::kAborted;
     meta.commit_ts = 0;
     RELDB_RETURN_NOT_OK(PutTxnMeta(txn->txn_id_, meta));
-    txn->finished_ = true;
+    MarkTxnFinishedLocked(txn);
     return STATUS(OK);
 }
 

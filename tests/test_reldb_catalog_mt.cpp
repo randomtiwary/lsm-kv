@@ -153,6 +153,8 @@ TEST(reldb_catalog_mt_duplicate_create) {
 }
 
 // Concurrent Get through Transaction paths while another thread Creates tables.
+// With the B2 DDL gate, CreateTable fails while any txn is open, and Begin fails
+// while ddl_in_progress_ is set — both are expected and retried (not errors).
 TEST(reldb_catalog_mt_txn_lookup) {
     auto dir = MakeTempDir("reldb_cat_mt_txn");
     {
@@ -166,8 +168,22 @@ TEST(reldb_catalog_mt_txn_lookup) {
 
         std::thread creator([&]() {
             for (int i = 1; i < 16; ++i) {
-                auto st = db->CreateTable(TableN(i));
-                if (!st.ok()) errors.fetch_add(1);
+                bool ok = false;
+                for (int attempt = 0; attempt < 1000; ++attempt) {
+                    auto st = db->CreateTable(TableN(i));
+                    if (st.ok()) {
+                        ok = true;
+                        break;
+                    }
+                    // Reader holds open_txn_count_ > 0 during Get/Abort.
+                    if (st.IsInvalidArgument()) {
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    errors.fetch_add(1);
+                    break;
+                }
+                if (!ok) errors.fetch_add(1);
             }
             stop.store(true);
         });
@@ -177,6 +193,8 @@ TEST(reldb_catalog_mt_txn_lookup) {
                 std::unique_ptr<reldb::Transaction> txn;
                 auto bs = db->Begin(&txn);
                 if (!bs.ok()) {
+                    // CreateTable briefly sets ddl_in_progress_.
+                    if (bs.IsInvalidArgument()) continue;
                     errors.fetch_add(1);
                     continue;
                 }
@@ -200,6 +218,11 @@ TEST(reldb_catalog_mt_txn_lookup) {
         reader.join();
 
         expect_eq(errors.load(), 0, "no txn catalog errors");
+        // All tables should exist after creator finishes.
+        for (int i = 0; i < 16; ++i) {
+            reldb::TableSchema got;
+            EXPECT_OK(db->GetTable("t" + std::to_string(i), &got), "final get");
+        }
     }
     RemoveDirRecursive(dir);
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -34,7 +35,8 @@ public:
 
     // DDL is NOT transactional in v1: applies immediately outside any user
     // Transaction (no snapshot, no Abort rollback). See docs/RELATIONAL.md.
-    // Takes mu_ exclusively (Catalog API is private to Database).
+    // Global DDL gate: requires no open user transactions (open_txn_count_ == 0);
+    // runs under exclusive mu_ with ddl_in_progress_ set for the duration.
     lsmkv::Status CreateTable(const TableSchema& schema);
 
     // Catalog lookup. Uses a shared lock on cache hits; upgrades to exclusive
@@ -46,13 +48,20 @@ public:
     // *txn must be empty (get() == nullptr); otherwise InvalidArgument.
     // Caller owns the unique_ptr; Commit() or Abort() before destroy (dtor aborts).
     // Transaction holds a shared_ptr to this Database.
+    // Increments open_txn_count_; fails if ddl_in_progress_.
     lsmkv::Status Begin(std::unique_ptr<Transaction>* txn);
+
+    // Live user transactions (Begin without Commit/Abort/dtor finish). In-memory only.
+    std::size_t open_txn_count() const;
 
     std::shared_ptr<MvccStore> store() const { return store_; }
     std::shared_ptr<lsmkv::DB> kv() const { return kv_; }
 
     lsmkv::Status GetTxnMeta(TxnId id, TxnMeta* out) const;
     lsmkv::Status PutTxnMeta(TxnId id, const TxnMeta& meta);
+
+    // Test-only: set ddl_in_progress_ without running DDL (for Begin gate tests).
+    void TEST_SetDdlInProgress(bool v);
 
 private:
     friend class Transaction;
@@ -71,6 +80,9 @@ private:
     lsmkv::Status RestoreHeads(const std::vector<TxnWrite>& writes);
     lsmkv::Status RestoreWrittenHeads(Transaction* txn);
 
+    // Under mu_: mark txn finished and decrement open_txn_count_ once.
+    void MarkTxnFinishedLocked(Transaction* txn);
+
     // Shared for concurrent reads (GetTable cache hit, Transaction::Get, scan
     // visibility); exclusive for DDL, Begin/Commit/Abort, and writes.
     // Mutable so const GetTable/HasTable can lock.
@@ -82,6 +94,10 @@ private:
     Timestamp next_ts_ = 1;
     TxnId next_txn_id_ = 1;
     Timestamp next_version_id_ = 1;
+
+    // DDL / txn gate (in-memory; always 0 after Open + RecoverTxns).
+    std::size_t open_txn_count_ = 0;
+    bool ddl_in_progress_ = false;
 };
 
 }  // namespace reldb
