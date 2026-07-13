@@ -318,8 +318,8 @@ lsmkv::Status Transaction::Abort() {
 }
 
 void Transaction::TEST_AbandonWithoutAbort() {
-    // Keep open_txn_count_ accurate for the DDL gate (K20): abandon still
-    // finishes the live txn from the Database's perspective without durable Abort.
+    // Keep open_txn_count_ accurate for the DDL gate: abandon still finishes the
+    // live txn from the Database's perspective without a durable Abort.
     if (db_ != nullptr && !finished_) {
         std::unique_lock<std::shared_mutex> lock(db_->mu_);
         db_->MarkTxnFinishedLocked(this);

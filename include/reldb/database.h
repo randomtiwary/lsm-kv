@@ -35,8 +35,8 @@ public:
 
     // DDL is NOT transactional in v1: applies immediately outside any user
     // Transaction (no snapshot, no Abort rollback). See docs/RELATIONAL.md.
-    // Global gate (K20): requires open_txn_count_ == 0; runs under exclusive mu_
-    // with ddl_in_progress_ set for the duration.
+    // Global DDL gate: requires no open user transactions (open_txn_count_ == 0);
+    // runs under exclusive mu_ with ddl_in_progress_ set for the duration.
     lsmkv::Status CreateTable(const TableSchema& schema);
 
     // Catalog lookup. Uses a shared lock on cache hits; upgrades to exclusive

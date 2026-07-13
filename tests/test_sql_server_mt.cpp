@@ -255,8 +255,8 @@ TEST(sql_server_mt_concurrent_create_and_select) {
             std::string r;
             const std::string sql =
                 "CREATE TABLE t" + std::to_string(i) + "(id INT PRIMARY KEY, name TEXT);";
-            // Autocommit SELECT briefly elevates open_txn_count_ and can reject DDL
-            // (K20). Retry until CREATE succeeds or we give up.
+            // Autocommit SELECT briefly elevates open_txn_count_ and can reject
+            // DDL. Retry until CREATE succeeds or we give up.
             bool ok = false;
             for (int attempt = 0; attempt < 200; ++attempt) {
                 if (!RoundTrip(fd, sql, &r, std::chrono::seconds(5))) {
