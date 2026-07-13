@@ -154,6 +154,54 @@ bool SqlHandleLine(SqlSession& session, std::string& conn_buffer, std::string_vi
 // SqlServer TCP
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Owns a socket fd; closes on destroy unless release() was called.
+class ScopedFd {
+public:
+    explicit ScopedFd(int fd = -1) : fd_(fd) {}
+    ~ScopedFd() { reset(); }
+
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+
+    int get() const { return fd_; }
+    explicit operator bool() const { return fd_ >= 0; }
+
+    void reset(int fd = -1) {
+        if (fd_ >= 0) {
+            ::close(fd_);
+        }
+        fd_ = fd;
+    }
+
+    int release() {
+        const int t = fd_;
+        fd_ = -1;
+        return t;
+    }
+
+private:
+    int fd_;
+};
+
+// Wait until active_clients hits 0 or timeout; warn if clients remain.
+void WaitForIdleClients(const std::atomic<int>& active_clients, std::chrono::seconds timeout,
+                        const char* context) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (active_clients.load(std::memory_order_acquire) > 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const int left = active_clients.load(std::memory_order_acquire);
+    if (left > 0) {
+        std::cerr << "warning: " << context << ": " << left
+                  << " active client(s) still running after " << timeout.count() << "s\n";
+    }
+}
+
+}  // namespace
+
 SqlServer::SqlServer(SqlServerConfig config) : config_(std::move(config)) {}
 
 SqlServer::~SqlServer() {
@@ -162,11 +210,7 @@ SqlServer::~SqlServer() {
         ::close(listen_fd_);
         listen_fd_ = -1;
     }
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (active_clients_.load(std::memory_order_acquire) > 0 &&
-           std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    WaitForIdleClients(active_clients_, std::chrono::seconds(5), "SqlServer destructor");
 }
 
 lsmkv::Status SqlServer::Start() {
@@ -176,42 +220,37 @@ lsmkv::Status SqlServer::Start() {
 
     lsmkv::Options options;
     options.create_if_missing = true;
-    RELDB_RETURN_NOT_OK(Database::Open(options, config_.db_path, &db_));
 
-    listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd_ < 0) {
-        db_.reset();
+    // Keep db local until bind/listen succeed so failures do not leave partial state.
+    std::shared_ptr<Database> db;
+    RELDB_RETURN_NOT_OK(Database::Open(options, config_.db_path, &db));
+
+    ScopedFd sock(::socket(AF_INET, SOCK_STREAM, 0));
+    if (!sock) {
         return STATUS(IOError, std::string("socket() failed: ") + std::strerror(errno));
     }
 
     int yes = 1;
-    ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    ::setsockopt(sock.get(), SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(static_cast<uint16_t>(config_.port));
     if (::inet_pton(AF_INET, config_.host.c_str(), &addr.sin_addr) != 1) {
-        ::close(listen_fd_);
-        listen_fd_ = -1;
-        db_.reset();
         return STATUS(InvalidArgument, "invalid host address: " + config_.host);
     }
 
-    if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        const std::string msg = std::string("bind() failed: ") + std::strerror(errno);
-        ::close(listen_fd_);
-        listen_fd_ = -1;
-        db_.reset();
-        return STATUS(IOError, msg);
+    if (::bind(sock.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        return STATUS(IOError, std::string("bind() failed: ") + std::strerror(errno));
     }
 
-    if (::listen(listen_fd_, 128) < 0) {
-        const std::string msg = std::string("listen() failed: ") + std::strerror(errno);
-        ::close(listen_fd_);
-        listen_fd_ = -1;
-        db_.reset();
-        return STATUS(IOError, msg);
+    if (::listen(sock.get(), 128) < 0) {
+        return STATUS(IOError, std::string("listen() failed: ") + std::strerror(errno));
     }
+
+    // Success: commit ownership to the SqlServer instance.
+    listen_fd_ = sock.release();
+    db_ = std::move(db);
 
     sockaddr_in bound{};
     socklen_t len = sizeof(bound);
@@ -266,8 +305,10 @@ void SqlServer::ServeClient(int client_fd) {
     ::close(client_fd);
 }
 
-void SqlServer::Serve() {
-    if (listen_fd_ < 0) return;
+lsmkv::Status SqlServer::Serve() {
+    if (listen_fd_ < 0) {
+        return STATUS(InvalidArgument, "Serve called before successful Start()");
+    }
 
     while (running_.load(std::memory_order_acquire)) {
         fd_set rfds;
@@ -312,11 +353,8 @@ void SqlServer::Serve() {
         listen_fd_ = -1;
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (active_clients_.load(std::memory_order_acquire) > 0 &&
-           std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    WaitForIdleClients(active_clients_, std::chrono::seconds(10), "SqlServer::Serve");
+    return STATUS(OK);
 }
 
 void SqlServer::Stop() {

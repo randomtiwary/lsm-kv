@@ -93,7 +93,12 @@ struct RunningSqlServer {
             return;
         }
         port = server.port();
-        thr = std::thread([this] { server.Serve(); });
+        thr = std::thread([this] {
+            const auto st = server.Serve();
+            if (!st.ok()) {
+                std::cerr << "SqlServer::Serve failed: " << st.ToString() << "\n";
+            }
+        });
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
@@ -114,6 +119,18 @@ struct RunningSqlServer {
 };
 
 }  // namespace
+
+TEST(sql_server_serve_before_start_is_error) {
+    reldb::SqlServerConfig cfg;
+    cfg.host = "127.0.0.1";
+    cfg.port = 0;
+    cfg.db_path = MakeTempDir("reldb_sql_srv_bad");
+    reldb::SqlServer server(cfg);
+    const auto st = server.Serve();
+    expect(st.IsInvalidArgument(), "serve before start");
+    expect(st.ToString().find("Start") != std::string::npos, "mentions Start");
+    RemoveDirRecursive(cfg.db_path);
+}
 
 TEST(sql_server_parse_args) {
     reldb::SqlServerConfig cfg;

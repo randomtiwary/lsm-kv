@@ -49,8 +49,12 @@ int main(int argc, char** argv) {
     std::cout << "reldb_sql_server listening on " << cfg.host << ":" << server.port()
               << "  db=" << cfg.db_path << "  max_clients=" << cfg.max_clients << std::endl;
 
-    server.Serve();
+    s = server.Serve();
     g_server = nullptr;
+    if (!s.ok()) {
+        std::cerr << "serve failed: " << s.ToString() << "\n";
+        return 1;
+    }
     std::cout << "reldb_sql_server shut down" << std::endl;
     return 0;
 }

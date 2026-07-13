@@ -53,7 +53,8 @@ public:
     lsmkv::Status Start();
 
     // Blocking accept loop until Stop() (or fatal accept error).
-    void Serve();
+    // Returns InvalidArgument if called before a successful Start().
+    lsmkv::Status Serve();
 
     // Thread-safe request to leave Serve().
     void Stop();
