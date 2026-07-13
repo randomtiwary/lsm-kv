@@ -21,7 +21,7 @@ std::shared_ptr<reldb::Database> OpenDb(const std::string& dir) {
     return db;
 }
 
-std::pair<bool, std::string> Feed(reldb::SqlSession* session, std::string* buf,
+std::pair<bool, std::string> Feed(reldb::SqlSession& session, std::string& buf,
                                   const std::string& line) {
     std::string reply;
     const bool keep = reldb::SqlHandleLine(session, buf, line, &reply);
@@ -38,17 +38,17 @@ TEST(sql_handle_ping_quit_status) {
         reldb::SqlSession session(db);
         std::string buf;
 
-        auto r = Feed(&session, &buf, "PING");
+        auto r = Feed(session, buf, "PING");
         expect(r.first, "keep after ping");
         expect_eq(r.second, std::string("+PONG\n"), "pong");
 
-        r = Feed(&session, &buf, "  ping  ");  // case-insensitive + trim
+        r = Feed(session, buf, "  ping  ");  // case-insensitive + trim
         expect_eq(r.second, std::string("+PONG\n"), "pong lower");
 
-        r = Feed(&session, &buf, "STATUS");
+        r = Feed(session, buf, "STATUS");
         expect_eq(r.second, std::string("+OK in_txn=0\n"), "status idle");
 
-        r = Feed(&session, &buf, "QUIT");
+        r = Feed(session, buf, "QUIT");
         expect(!r.first, "close after quit");
         expect_eq(r.second, std::string("+OK\n"), "quit ok");
     }
@@ -63,14 +63,14 @@ TEST(sql_handle_execute_sql_and_select) {
         reldb::SqlSession session(db);
         std::string buf;
 
-        auto r = Feed(&session, &buf, "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);");
+        auto r = Feed(session, buf, "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);");
         expect(r.first, "keep");
         expect_eq(r.second, std::string("+OK\n"), "create ok");
 
-        r = Feed(&session, &buf, "INSERT INTO users VALUES (1, 'ada');");
+        r = Feed(session, buf, "INSERT INTO users VALUES (1, 'ada');");
         expect_eq(r.second, std::string("+OK rows_affected=1\n"), "insert");
 
-        r = Feed(&session, &buf, "SELECT id, name FROM users WHERE id = 1;");
+        r = Feed(session, buf, "SELECT id, name FROM users WHERE id = 1;");
         expect(r.second.find("*RESULT 1 2\n") != std::string::npos, "result hdr");
         expect(r.second.find("$I:1\n") != std::string::npos, "id cell");
         expect(r.second.find("$S:ada\n") != std::string::npos, "name cell");
@@ -99,14 +99,14 @@ TEST(sql_handle_multiline_statement) {
                       seed),
                   "seed");
 
-        auto r = Feed(&session, &buf, "SELECT id, name");
+        auto r = Feed(session, buf, "SELECT id, name");
         expect(r.second.empty(), "no reply yet");
         expect(!buf.empty(), "buffer holds partial");
 
-        r = Feed(&session, &buf, "FROM t");
+        r = Feed(session, buf, "FROM t");
         expect(r.second.empty(), "still partial");
 
-        r = Feed(&session, &buf, "WHERE id = 1;");
+        r = Feed(session, buf, "WHERE id = 1;");
         expect(!r.second.empty(), "complete reply");
         expect(buf.empty(), "buffer cleared");
         expect(r.second.find("$I:1\n") != std::string::npos, "id");
@@ -123,26 +123,26 @@ TEST(sql_handle_txn_stickiness) {
         reldb::SqlSession session(db);
         std::string buf;
 
-        Feed(&session, &buf, "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);");
+        Feed(session, buf, "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);");
 
-        auto r = Feed(&session, &buf, "BEGIN;");
+        auto r = Feed(session, buf, "BEGIN;");
         expect_eq(r.second, std::string("+OK\n"), "begin");
         expect(session.InTransaction(), "in txn");
 
-        r = Feed(&session, &buf, "STATUS");
+        r = Feed(session, buf, "STATUS");
         expect_eq(r.second, std::string("+OK in_txn=1\n"), "status in txn");
 
-        r = Feed(&session, &buf, "INSERT INTO users VALUES (1, 'ada');");
+        r = Feed(session, buf, "INSERT INTO users VALUES (1, 'ada');");
         expect_eq(r.second, std::string("+OK rows_affected=1\n"), "insert in txn");
 
-        r = Feed(&session, &buf, "SELECT name FROM users WHERE id = 1;");
+        r = Feed(session, buf, "SELECT name FROM users WHERE id = 1;");
         expect(r.second.find("$S:ada\n") != std::string::npos, "sees uncommitted");
 
-        r = Feed(&session, &buf, "COMMIT;");
+        r = Feed(session, buf, "COMMIT;");
         expect_eq(r.second, std::string("+OK\n"), "commit");
         expect(!session.InTransaction(), "not in txn");
 
-        r = Feed(&session, &buf, "STATUS");
+        r = Feed(session, buf, "STATUS");
         expect_eq(r.second, std::string("+OK in_txn=0\n"), "status after commit");
     }
     RemoveDirRecursive(dir);
@@ -156,18 +156,18 @@ TEST(sql_handle_reset_on_empty_buffer) {
         reldb::SqlSession session(db);
         std::string buf;
 
-        Feed(&session, &buf, "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);");
-        Feed(&session, &buf, "BEGIN;");
-        Feed(&session, &buf, "INSERT INTO users VALUES (1, 'ghost');");
+        Feed(session, buf, "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);");
+        Feed(session, buf, "BEGIN;");
+        Feed(session, buf, "INSERT INTO users VALUES (1, 'ghost');");
         expect(session.InTransaction(), "in txn");
 
-        auto r = Feed(&session, &buf, "RESET");
+        auto r = Feed(session, buf, "RESET");
         expect_eq(r.second, std::string("+OK\n"), "reset ok");
         expect(!session.InTransaction(), "txn aborted");
         expect(buf.empty(), "buf clear");
 
         // Ghost row must not be visible after abort.
-        r = Feed(&session, &buf, "SELECT id FROM users WHERE id = 1;");
+        r = Feed(session, buf, "SELECT id FROM users WHERE id = 1;");
         // empty result set
         expect(r.second.find("*RESULT 0 ") != std::string::npos, "no row");
     }
@@ -182,8 +182,8 @@ TEST(sql_handle_ddl_error_in_txn) {
         reldb::SqlSession session(db);
         std::string buf;
 
-        Feed(&session, &buf, "BEGIN;");
-        auto r = Feed(&session, &buf, "CREATE TABLE t(id INT PRIMARY KEY);");
+        Feed(session, buf, "BEGIN;");
+        auto r = Feed(session, buf, "CREATE TABLE t(id INT PRIMARY KEY);");
         expect(r.second.find("-ERR InvalidArgument:") != std::string::npos, "err prefix");
         expect(r.second.find("DDL is not allowed inside a transaction") != std::string::npos,
                "err msg");
@@ -202,17 +202,17 @@ TEST(sql_handle_statement_too_large) {
 
         // Fill near the cap then overflow.
         const std::string chunk(reldb::sqlproto::kMaxStatementBytes - 10, 'x');
-        auto r = Feed(&session, &buf, chunk);
+        auto r = Feed(session, buf, chunk);
         expect(r.second.empty(), "partial no reply");
         expect(!buf.empty(), "buffered");
 
-        r = Feed(&session, &buf, "yyyyyyyyyyyy");
+        r = Feed(session, buf, "yyyyyyyyyyyy");
         expect(r.second.find("statement too large") != std::string::npos, "too large");
         expect(buf.empty(), "cleared on overflow");
         expect(r.first, "keep open");
 
         // Connection still usable.
-        r = Feed(&session, &buf, "STATUS");
+        r = Feed(session, buf, "STATUS");
         expect_eq(r.second, std::string("+OK in_txn=0\n"), "still works");
     }
     RemoveDirRecursive(dir);
@@ -229,13 +229,13 @@ TEST(sql_handle_meta_ignored_mid_statement) {
         reldb::QueryResult seed;
         EXPECT_OK(session.Execute("CREATE TABLE t(id INT PRIMARY KEY);", seed), "seed");
 
-        Feed(&session, &buf, "SELECT id");
+        Feed(session, buf, "SELECT id");
         // "PING" mid-statement is just another line of SQL (will fail on execute).
-        auto r = Feed(&session, &buf, "PING");
+        auto r = Feed(session, buf, "PING");
         expect(r.second.empty(), "no meta mid stream");
         expect(buf.find("PING") != std::string::npos, "appended");
 
-        r = Feed(&session, &buf, "FROM t;");
+        r = Feed(session, buf, "FROM t;");
         // Parse error expected
         expect(r.second.find("-ERR ") == 0, "sql error");
         expect(buf.empty(), "cleared after execute");
