@@ -17,13 +17,13 @@ class CatalogTestAccess;
 // Persists TableSchema records in an lsmkv::DB under keys:
 //   c/t/<table_name>  →  TableSchema::Encode() bytes
 //
-// Keeps an in-memory cache populated on Create / Get (after miss).
-// v1 does not support DROP TABLE or ALTER (see roadmap).
+// Keeps an in-memory cache populated on Create / Get (after miss),
+// updated by PutTable, and erased by DropTable.
 //
-// Access control: Create/Get/Has are private. Only Database (production) and
-// CatalogTestAccess (unit tests) may call them. Database serializes access with
-// its shared_mutex (shared for pure cache hits, unique for mutations / KV loads).
-// Catalog itself never locks.
+// Access control: Create/Drop/Put/Get/Has are private. Only Database
+// (production) and CatalogTestAccess (unit tests) may call them. Database
+// serializes access with its shared_mutex (shared for pure cache hits, unique
+// for mutations / KV loads). Catalog itself never locks.
 //
 // Shares ownership of the underlying DB via shared_ptr so Catalog can outlive
 // the creating stack frame without a raw non-owning pointer.
@@ -41,6 +41,17 @@ private:
     // Validate schema, reject duplicates, Put to KV, update cache.
     // Caller must hold Database::mu_ exclusively (unique_lock).
     lsmkv::Status CreateTable(const TableSchema& schema);
+
+    // Delete catalog key and erase cache entry. NotFound if the table is
+    // missing. Does not touch row/version data (Database::DropTable owns GC).
+    // Caller must hold Database::mu_ exclusively.
+    lsmkv::Status DropTable(const std::string& name);
+
+    // Validate schema, overwrite KV encode, refresh cache. Used by ALTER
+    // (and any path that must replace an existing catalog entry). Does not
+    // require the table to already exist (upsert of the catalog record).
+    // Caller must hold Database::mu_ exclusively.
+    lsmkv::Status PutTable(const TableSchema& schema);
 
     // Lookup by name (cache then KV). NotFound if missing.
     // May mutate cache_ on miss — caller must hold Database::mu_ exclusively.

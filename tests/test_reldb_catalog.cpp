@@ -16,12 +16,22 @@ public:
     static lsmkv::Status CreateTable(Catalog& cat, const TableSchema& schema) {
         return cat.CreateTable(schema);
     }
+    static lsmkv::Status DropTable(Catalog& cat, const std::string& name) {
+        return cat.DropTable(name);
+    }
+    static lsmkv::Status PutTable(Catalog& cat, const TableSchema& schema) {
+        return cat.PutTable(schema);
+    }
     static lsmkv::Status GetTable(const Catalog& cat, const std::string& name,
                                   TableSchema* out) {
         return cat.GetTable(name, out);
     }
     static lsmkv::Status HasTable(const Catalog& cat, const std::string& name, bool* exists) {
         return cat.HasTable(name, exists);
+    }
+    // Exposes cache probe for drop/put cache-coherence checks.
+    static bool LookupCache(const Catalog& cat, const std::string& name, TableSchema* out) {
+        return cat.LookupCache(name, out);
     }
 };
 
@@ -121,6 +131,127 @@ TEST(reldb_catalog_persists_across_reopen) {
 
     // Key layout is stable for debugging / future tools.
     expect_eq(reldb::Catalog::TableKey("users"), std::string("c/t/users"), "key");
+
+    kv.reset();
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_catalog_drop_table) {
+    auto dir = MakeTempDir("reldb_cat_drop");
+    auto kv = OpenKv(dir);
+    expect(kv != nullptr, "open");
+
+    reldb::Catalog cat(kv);
+    expect(Access::CreateTable(cat, UsersSchema()).ok(), "create");
+
+    // Drop removes KV entry and cache.
+    expect(Access::DropTable(cat, "users").ok(), "drop");
+    bool exists = true;
+    expect(Access::HasTable(cat, "users", &exists).ok(), "has after drop");
+    expect(!exists, "gone");
+    reldb::TableSchema got;
+    expect(Access::GetTable(cat, "users", &got).IsNotFound(), "get after drop");
+    expect(!Access::LookupCache(cat, "users", &got), "cache cleared");
+
+    // Idempotent failure: missing table is NotFound.
+    expect(Access::DropTable(cat, "users").IsNotFound(), "drop missing");
+    expect(Access::DropTable(cat, "never_existed").IsNotFound(), "drop never");
+
+    // Create is allowed again after drop.
+    expect(Access::CreateTable(cat, UsersSchema()).ok(), "recreate");
+    expect(Access::GetTable(cat, "users", &got).ok(), "get recreated");
+
+    kv.reset();
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_catalog_drop_persists) {
+    auto dir = MakeTempDir("reldb_cat_drop_persist");
+    {
+        auto kv = OpenKv(dir);
+        expect(kv != nullptr, "open");
+        reldb::Catalog cat(kv);
+        expect(Access::CreateTable(cat, UsersSchema()).ok(), "create");
+        expect(Access::DropTable(cat, "users").ok(), "drop");
+    }
+
+    auto kv = OpenKv(dir);
+    expect(kv != nullptr, "reopen");
+    reldb::Catalog cat2(kv);
+    reldb::TableSchema got;
+    expect(Access::GetTable(cat2, "users", &got).IsNotFound(), "still gone");
+    bool exists = true;
+    expect(Access::HasTable(cat2, "users", &exists).ok(), "has status");
+    expect(!exists, "has false");
+
+    kv.reset();
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_catalog_put_table) {
+    auto dir = MakeTempDir("reldb_cat_put");
+    auto kv = OpenKv(dir);
+    expect(kv != nullptr, "open");
+
+    reldb::Catalog cat(kv);
+    expect(Access::CreateTable(cat, UsersSchema()).ok(), "create");
+
+    // Overwrite schema (simulates ALTER ADD COLUMN catalog step).
+    reldb::TableSchema widened("users", {
+        {"id", reldb::ColumnType::kInt64, true},
+        {"name", reldb::ColumnType::kString, false},
+        {"age", reldb::ColumnType::kInt64, false},
+    });
+    expect(Access::PutTable(cat, widened).ok(), "put");
+
+    reldb::TableSchema got;
+    expect(Access::GetTable(cat, "users", &got).ok(), "get after put");
+    expect_eq(got.num_columns(), static_cast<std::size_t>(3), "ncols");
+    expect_eq(got.columns()[2].name, std::string("age"), "new col");
+
+    // Cache must reflect the overwrite (not stale CreateTable entry).
+    reldb::TableSchema cached;
+    expect(Access::LookupCache(cat, "users", &cached), "cache hit");
+    expect_eq(cached.num_columns(), static_cast<std::size_t>(3), "cache ncols");
+
+    // PutTable rejects invalid schemas.
+    reldb::TableSchema bad("", {{"id", reldb::ColumnType::kInt64, true}});
+    expect(Access::PutTable(cat, bad).IsInvalidArgument(), "invalid put");
+
+    // PutTable can install a brand-new catalog entry (upsert).
+    reldb::TableSchema accounts("accounts", {
+        {"uid", reldb::ColumnType::kString, true},
+        {"bal", reldb::ColumnType::kInt64, false},
+    });
+    expect(Access::PutTable(cat, accounts).ok(), "put new");
+    expect(Access::GetTable(cat, "accounts", &got).ok(), "get accounts");
+
+    kv.reset();
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_catalog_put_persists) {
+    auto dir = MakeTempDir("reldb_cat_put_persist");
+    {
+        auto kv = OpenKv(dir);
+        expect(kv != nullptr, "open");
+        reldb::Catalog cat(kv);
+        expect(Access::CreateTable(cat, UsersSchema()).ok(), "create");
+        reldb::TableSchema widened("users", {
+            {"id", reldb::ColumnType::kInt64, true},
+            {"name", reldb::ColumnType::kString, false},
+            {"age", reldb::ColumnType::kInt64, false},
+        });
+        expect(Access::PutTable(cat, widened).ok(), "put");
+    }
+
+    auto kv = OpenKv(dir);
+    expect(kv != nullptr, "reopen");
+    reldb::Catalog cat2(kv);
+    reldb::TableSchema got;
+    expect(Access::GetTable(cat2, "users", &got).ok(), "get after reopen");
+    expect_eq(got.num_columns(), static_cast<std::size_t>(3), "ncols after reopen");
+    expect_eq(got.columns()[2].name, std::string("age"), "age after reopen");
 
     kv.reset();
     RemoveDirRecursive(dir);

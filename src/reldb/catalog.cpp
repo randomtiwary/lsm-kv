@@ -35,6 +35,28 @@ lsmkv::Status Catalog::CreateTable(const TableSchema& schema) {
     return STATUS(OK);
 }
 
+lsmkv::Status Catalog::DropTable(const std::string& name) {
+    bool exists = false;
+    RELDB_RETURN_NOT_OK(HasTable(name, &exists));
+    if (!exists) {
+        return STATUS(NotFound, "table not found: " + name);
+    }
+
+    RELDB_RETURN_NOT_OK(db_->Delete(lsmkv::WriteOptions(), TableKey(name)));
+    cache_.erase(name);
+    return STATUS(OK);
+}
+
+lsmkv::Status Catalog::PutTable(const TableSchema& schema) {
+    RELDB_RETURN_NOT_OK(schema.Validate());
+
+    RELDB_RETURN_NOT_OK(
+        db_->Put(lsmkv::WriteOptions(), TableKey(schema.name()), schema.Encode()));
+
+    cache_[schema.name()] = schema;
+    return STATUS(OK);
+}
+
 lsmkv::Status Catalog::GetTable(const std::string& name, TableSchema* out) const {
     if (out == nullptr) {
         return STATUS(InvalidArgument, "null out");
