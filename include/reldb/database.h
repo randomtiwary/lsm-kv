@@ -39,6 +39,11 @@ public:
     // runs under exclusive mu_ with ddl_in_progress_ set for the duration.
     lsmkv::Status CreateTable(const TableSchema& schema);
 
+    // DROP TABLE: remove catalog entry, then eager-delete d/<name>/ and
+    // v/<name>/ prefixes (collect keys, then Delete — no live iterator across
+    // Delete). NotFound if the table is missing. Same DDL gate as CreateTable.
+    lsmkv::Status DropTable(const std::string& name);
+
     // Catalog lookup. Uses a shared lock on cache hits; upgrades to exclusive
     // only when loading from KV / filling the cache (double-checked).
     lsmkv::Status GetTable(const std::string& name, TableSchema* out) const;
