@@ -7,7 +7,6 @@
 #include "reldb/database.h"
 #include "reldb/macros.h"
 #include "reldb/schema.h"
-// MarkTxnFinishedLocked needs Database::mu_ (friend).
 
 namespace reldb {
 namespace {

@@ -7,6 +7,7 @@
 #include "lsmkv/encoding.h"
 #include "lsmkv/slice.h"
 #include "reldb/macros.h"
+#include "reldb/scoped_util.h"
 #include "reldb/txn.h"
 
 namespace reldb {
@@ -138,10 +139,7 @@ lsmkv::Status Database::CreateTable(const TableSchema& schema) {
         return STATUS(InvalidArgument, "DDL in progress");
     }
     ddl_in_progress_ = true;
-    struct ClearDdl {
-        bool& flag;
-        ~ClearDdl() { flag = false; }
-    } clear{ddl_in_progress_};
+    ScopedBool clear_ddl(ddl_in_progress_, false);
     return catalog_->CreateTable(schema);
 }
 
