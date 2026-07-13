@@ -107,6 +107,16 @@ if(LSMKV_BUILD_SERVER AND TARGET reldb_sql_protocol_lib
     install(TARGETS reldb_sql_server RUNTIME DESTINATION bin)
 endif()
 
+# Network SQL client (talks to reldb_sql_server via sqlproto). No readline.
+if(LSMKV_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/reldb_sql_cli.cpp"
+   AND TARGET reldb_sql_protocol_lib)
+    add_executable(reldb_sql_cli examples/reldb_sql_cli.cpp)
+    target_link_libraries(reldb_sql_cli PRIVATE reldb_sql_protocol_lib)
+    target_compile_options(reldb_sql_cli PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
+    )
+endif()
+
 if(LSMKV_BUILD_TESTS)
     enable_testing()
     file(GLOB LSMKV_TEST_SOURCES CONFIGURE_DEPENDS
