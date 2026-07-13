@@ -83,9 +83,14 @@ if(LSMKV_BUILD_SERVER AND TARGET lsmkv_server_lib)
     install(TARGETS lsmkv_server RUNTIME DESTINATION bin)
 endif()
 
-# SQL wire protocol codec (no TCP). Shared by future reldb_sql_server / CLI / tests.
+# SQL protocol codec + connection request handler (no TCP listen yet).
+# Shared by future reldb_sql_server / CLI / tests.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sql_server/protocol.cpp")
-    add_library(reldb_sql_protocol_lib sql_server/protocol.cpp)
+    set(RELDB_SQL_SERVER_SOURCES sql_server/protocol.cpp)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/sql_server/sql_server.cpp")
+        list(APPEND RELDB_SQL_SERVER_SOURCES sql_server/sql_server.cpp)
+    endif()
+    add_library(reldb_sql_protocol_lib ${RELDB_SQL_SERVER_SOURCES})
     target_include_directories(reldb_sql_protocol_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/sql_server)
     target_link_libraries(reldb_sql_protocol_lib PUBLIC lsmkv_lib)
     target_compile_options(reldb_sql_protocol_lib PRIVATE
