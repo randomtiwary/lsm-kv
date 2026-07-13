@@ -37,6 +37,7 @@ public:
     lsmkv::Status Validate() const;
 
     // Binary encode / decode for catalog persistence.
+    // Format v1: u8 version=1 | name | ncols | (col_name, type, pk, flags)*.
     std::string Encode() const;
     static lsmkv::Status Decode(const std::string& bytes, TableSchema* out);
 

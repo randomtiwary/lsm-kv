@@ -1,4 +1,7 @@
+#include <string>
+
 #include "test_harness.h"
+
 #include "reldb/schema.h"
 #include "reldb/types.h"
 
@@ -51,8 +54,11 @@ TEST(reldb_schema_codec_roundtrip) {
         {"balance", reldb::ColumnType::kInt64, false},
         {"closed", reldb::ColumnType::kBool, false},
     });
+    const std::string bytes = s.Encode();
+    expect(!bytes.empty() && bytes[0] == '\x01', "format version 1");
+
     reldb::TableSchema out;
-    expect(reldb::TableSchema::Decode(s.Encode(), &out).ok(), "decode");
+    expect(reldb::TableSchema::Decode(bytes, &out).ok(), "decode");
     expect_eq(out.name(), std::string("accounts"), "name");
     expect_eq(out.num_columns(), static_cast<std::size_t>(3), "ncols");
     expect_eq(out.columns()[0].name, std::string("uid"), "c0");
@@ -61,8 +67,24 @@ TEST(reldb_schema_codec_roundtrip) {
     expect(out.Validate().ok(), "still valid");
 }
 
+TEST(reldb_schema_codec_short_name) {
+    // 1-char names are fine; no dual-read ambiguity (no legacy path).
+    reldb::TableSchema s("t", {{"id", reldb::ColumnType::kInt64, true}});
+    reldb::TableSchema out;
+    expect(reldb::TableSchema::Decode(s.Encode(), &out).ok(), "decode");
+    expect_eq(out.name(), std::string("t"), "name");
+}
+
 TEST(reldb_schema_codec_corruption) {
     reldb::TableSchema out;
     expect(reldb::TableSchema::Decode("", &out).IsCorruption(), "empty");
-    expect(reldb::TableSchema::Decode("\x01x", &out).IsCorruption(), "truncated");
+    expect(reldb::TableSchema::Decode("\x01", &out).IsCorruption(), "version only");
+    expect(reldb::TableSchema::Decode("\x02\x01t\x01\x02id\x01\x01\x00", &out).IsCorruption(),
+           "bad version");
+    expect(reldb::TableSchema::Decode("\x01\x01", &out).IsCorruption(), "truncated body");
+
+    reldb::TableSchema s("t", {{"id", reldb::ColumnType::kInt64, true}});
+    std::string bad = s.Encode();
+    bad.back() = '\x01';  // unknown flags
+    expect(reldb::TableSchema::Decode(bad, &out).IsCorruption(), "unknown flags");
 }
