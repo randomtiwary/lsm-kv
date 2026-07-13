@@ -15,7 +15,7 @@ layers) fit together.
 | **SQL** | `CREATE TABLE`, `INSERT` / `SELECT` / `UPDATE` / `DELETE`, `BEGIN` / `COMMIT` / `ABORT`, simple `WHERE` / `ORDER BY` / `LIMIT` |
 | **Relational (C++)** | Schemas, rows, `Transaction` with SI, point get + table scan |
 | **Storage (LSM KV)** | WAL, MemTable (SkipList), SSTables, flush/compaction, crash recovery |
-| **Tools** | Interactive SQL shell, SQL TCP server (`reldb_sql_server`), demos, optional raw-KV TCP server |
+| **Tools** | Interactive SQL shell, SQL TCP server + CLI (`reldb_sql_server` / `reldb_sql_cli`), demos, optional raw-KV TCP server |
 
 **Not** a production Postgres/MySQL clone: no joins, aggregates, secondary indexes,
 or cost-based optimizer. See [docs/SQL.md](docs/SQL.md) and
@@ -37,6 +37,10 @@ ctest --test-dir build --output-on-failure
 # Networked SQL server (default 127.0.0.1:7380, no auth)
 ./scripts/run_sql_server.sh
 # or: ./scripts/run_sql_server.sh --db /path/to/db --port 7380
+
+# Network SQL client (another terminal; talks to the server)
+./scripts/run_sql_cli.sh
+./scripts/run_sql_cli.sh -c "SELECT 1;"
 ```
 
 ```text
@@ -182,6 +186,7 @@ ctest --test-dir build --output-on-failure
 |-----------------|---------|
 | `./scripts/run_sql_shell.sh` | Interactive SQL shell (needs **libreadline**) |
 | `./scripts/run_sql_server.sh` | SQL TCP server (default `127.0.0.1:7380`) |
+| `./scripts/run_sql_cli.sh` | Network SQL client for the server |
 | `./scripts/run_sql_example.sh` | Scripted SQL demo |
 | `./scripts/run_example.sh` | LSM KV Put/Get demo |
 | `reldb_example` | C++ transactional API demo |
@@ -222,7 +227,7 @@ include/lsmkv/     LSM KV engine public headers
 src/reldb/         MVCC, transactions, parser, executors, session
 src/               LSM engine implementation
 examples/          reldb_sql_shell, reldb_sql_example, reldb_example, lsmkv_example
-scripts/           run_sql_shell.sh, run_sql_server.sh, …
+scripts/           run_sql_shell.sh, run_sql_server.sh, run_sql_cli.sh, …
 tests/             Unit and integration tests
 docs/SQL.md        SQL dialect, plans, session behavior
 docs/RELATIONAL.md MVCC + snapshot isolation design
