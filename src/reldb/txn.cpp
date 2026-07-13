@@ -7,6 +7,7 @@
 #include "reldb/database.h"
 #include "reldb/macros.h"
 #include "reldb/schema.h"
+// MarkTxnFinishedLocked needs Database::mu_ (friend).
 
 namespace reldb {
 namespace {
@@ -317,7 +318,14 @@ lsmkv::Status Transaction::Abort() {
 }
 
 void Transaction::TEST_AbandonWithoutAbort() {
-    finished_ = true;
+    // Keep open_txn_count_ accurate for the DDL gate (K20): abandon still
+    // finishes the live txn from the Database's perspective without durable Abort.
+    if (db_ != nullptr && !finished_) {
+        std::unique_lock<std::shared_mutex> lock(db_->mu_);
+        db_->MarkTxnFinishedLocked(this);
+    } else {
+        finished_ = true;
+    }
     db_.reset();
 }
 
