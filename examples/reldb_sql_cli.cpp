@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "protocol.h"
+#include "reldb/query_format.h"
 #include "reldb/string_util.h"
 #include "reldb/types.h"
 
@@ -120,62 +121,8 @@ int Connect(const std::string& host, int port, std::string* error) {
     return fd;
 }
 
-void PrintTable(const reldb::QueryResult& r) {
-    if (!r.plan_tag.empty()) {
-        std::cout << "plan: " << r.plan_tag << "\n";
-    }
-    if (r.column_names.empty() && r.rows.empty()) {
-        std::cout << "ok\n";
-        return;
-    }
-
-    std::vector<std::size_t> widths(r.column_names.size(), 0);
-    for (std::size_t c = 0; c < r.column_names.size(); ++c) {
-        widths[c] = r.column_names[c].size();
-    }
-    std::vector<std::vector<std::string>> cells;
-    cells.reserve(r.rows.size());
-    for (const auto& row : r.rows) {
-        std::vector<std::string> line;
-        line.reserve(row.size());
-        for (std::size_t c = 0; c < row.size(); ++c) {
-            std::string s = row.at(c).ToString();
-            if (c < widths.size() && s.size() > widths[c]) widths[c] = s.size();
-            line.push_back(std::move(s));
-        }
-        cells.push_back(std::move(line));
-    }
-
-    auto print_sep = [&]() {
-        std::cout << "+";
-        for (std::size_t w : widths) {
-            std::cout << std::string(w + 2, '-') << "+";
-        }
-        std::cout << "\n";
-    };
-
-    if (!r.column_names.empty()) {
-        print_sep();
-        std::cout << "|";
-        for (std::size_t c = 0; c < r.column_names.size(); ++c) {
-            std::cout << " " << r.column_names[c]
-                      << std::string(widths[c] - r.column_names[c].size(), ' ') << " |";
-        }
-        std::cout << "\n";
-        print_sep();
-    }
-    for (const auto& line : cells) {
-        std::cout << "|";
-        for (std::size_t c = 0; c < line.size(); ++c) {
-            const std::size_t w = c < widths.size() ? widths[c] : line[c].size();
-            std::cout << " " << line[c] << std::string(w - line[c].size(), ' ') << " |";
-        }
-        std::cout << "\n";
-    }
-    if (!r.column_names.empty()) print_sep();
-    std::cout << "(" << r.rows.size() << " row" << (r.rows.size() == 1 ? "" : "s") << ")\n";
-}
-
+// Map a decoded wire reply to human output. SELECT-style results share
+// FormatQueryResult with reldb_sql_shell; OK/error lines are protocol-level.
 void PrintDecoded(const reldb::sqlproto::DecodedReply& d) {
     using reldb::sqlproto::ReplyKind;
     switch (d.kind) {
@@ -195,7 +142,7 @@ void PrintDecoded(const reldb::sqlproto::DecodedReply& d) {
             std::cerr << "ERROR: " << d.error_text << "\n";
             break;
         case ReplyKind::kResult:
-            PrintTable(d.result);
+            reldb::FormatQueryResult(std::cout, d.result);
             break;
         case ReplyKind::kUnknown:
             std::cerr << "ERROR: unknown reply\n";
