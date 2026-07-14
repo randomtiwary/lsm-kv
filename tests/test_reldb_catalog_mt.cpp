@@ -1,4 +1,5 @@
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -169,7 +170,7 @@ TEST(reldb_catalog_mt_txn_lookup) {
         std::thread creator([&]() {
             for (int i = 1; i < 16; ++i) {
                 bool ok = false;
-                for (int attempt = 0; attempt < 1000; ++attempt) {
+                for (int attempt = 0; attempt < 5000; ++attempt) {
                     auto st = db->CreateTable(TableN(i));
                     if (st.ok()) {
                         ok = true;
@@ -177,7 +178,7 @@ TEST(reldb_catalog_mt_txn_lookup) {
                     }
                     // Reader holds open_txn_count_ > 0 during Get/Abort.
                     if (st.IsInvalidArgument()) {
-                        std::this_thread::yield();
+                        std::this_thread::sleep_for(std::chrono::microseconds(50));
                         continue;
                     }
                     errors.fetch_add(1);
@@ -194,7 +195,10 @@ TEST(reldb_catalog_mt_txn_lookup) {
                 auto bs = db->Begin(&txn);
                 if (!bs.ok()) {
                     // CreateTable briefly sets ddl_in_progress_.
-                    if (bs.IsInvalidArgument()) continue;
+                    if (bs.IsInvalidArgument()) {
+                        std::this_thread::yield();
+                        continue;
+                    }
                     errors.fetch_add(1);
                     continue;
                 }
@@ -209,7 +213,11 @@ TEST(reldb_catalog_mt_txn_lookup) {
                 if (!gs2.IsNotFound()) {
                     errors.fetch_add(1);
                 }
-                EXPECT_OK(txn->Abort(), "abort");
+                if (!txn->Abort().ok()) {
+                    errors.fetch_add(1);
+                }
+                // Leave open_txn_count_ == 0 long enough for CreateTable's gate.
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
             }
         });
 

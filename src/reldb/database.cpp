@@ -2,9 +2,11 @@
 
 #include <mutex>
 #include <shared_mutex>
+#include <vector>
 
 #include "lsmkv/debug.h"
 #include "lsmkv/encoding.h"
+#include "lsmkv/options.h"
 #include "lsmkv/slice.h"
 #include "reldb/macros.h"
 #include "reldb/scoped_util.h"
@@ -16,6 +18,26 @@ namespace {
 const char kNextTsKey[] = "m/next_ts";
 const char kNextTxnKey[] = "m/next_txn";
 const char kNextVidKey[] = "m/next_vid";
+
+// Collect all user keys under prefix, destroy the iterator, then Delete each.
+// Do not Delete while an iterator over the same DB is live (invalidation).
+lsmkv::Status DeleteKeyPrefix(lsmkv::DB* db, const std::string& prefix) {
+    LSMKV_DCHECK(db != nullptr);
+    std::vector<std::string> keys;
+    {
+        auto it = db->NewIterator(lsmkv::ReadOptions());
+        it->Seek(prefix);
+        while (it->Valid() && it->key().starts_with(prefix)) {
+            keys.push_back(it->key().ToString());
+            it->Next();
+        }
+        RELDB_RETURN_NOT_OK(it->status());
+    }
+    for (const auto& key : keys) {
+        RELDB_RETURN_NOT_OK(db->Delete(lsmkv::WriteOptions(), key));
+    }
+    return STATUS(OK);
+}
 
 // TxnMeta wire format:
 //   state(1) + commit_ts(8)  [legacy / no write list]
@@ -141,6 +163,26 @@ lsmkv::Status Database::CreateTable(const TableSchema& schema) {
     ddl_in_progress_ = true;
     ScopedBool clear_ddl(ddl_in_progress_, false);
     return catalog_->CreateTable(schema);
+}
+
+lsmkv::Status Database::DropTable(const std::string& name) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    if (open_txn_count_ != 0) {
+        return STATUS(InvalidArgument, "DDL requires no open transactions");
+    }
+    if (ddl_in_progress_) {
+        return STATUS(InvalidArgument, "DDL in progress");
+    }
+    ddl_in_progress_ = true;
+    ScopedBool clear_ddl(ddl_in_progress_, false);
+
+    // Catalog first: after this, GetTable is NotFound even if GC is incomplete.
+    RELDB_RETURN_NOT_OK(catalog_->DropTable(name));
+
+    // Eager GC of row heads and version payloads (collect-then-delete).
+    RELDB_RETURN_NOT_OK(DeleteKeyPrefix(kv_.get(), "d/" + name + "/"));
+    RELDB_RETURN_NOT_OK(DeleteKeyPrefix(kv_.get(), "v/" + name + "/"));
+    return STATUS(OK);
 }
 
 std::size_t Database::open_txn_count() const {
