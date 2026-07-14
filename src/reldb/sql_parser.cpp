@@ -28,6 +28,8 @@ enum class TokenKind : std::uint8_t {
     kCreate,
     kDrop,
     kTable,
+    kIf,
+    kExists,
     kInsert,
     kInto,
     kValues,
@@ -101,6 +103,8 @@ const char* TokenKindName(TokenKind k) {
         case TokenKind::kCreate: return "CREATE";
         case TokenKind::kDrop: return "DROP";
         case TokenKind::kTable: return "TABLE";
+        case TokenKind::kIf: return "IF";
+        case TokenKind::kExists: return "EXISTS";
         case TokenKind::kInsert: return "INSERT";
         case TokenKind::kInto: return "INTO";
         case TokenKind::kValues: return "VALUES";
@@ -368,6 +372,8 @@ private:
         if (lower == "create") return TokenKind::kCreate;
         if (lower == "drop") return TokenKind::kDrop;
         if (lower == "table") return TokenKind::kTable;
+        if (lower == "if") return TokenKind::kIf;
+        if (lower == "exists") return TokenKind::kExists;
         if (lower == "insert") return TokenKind::kInsert;
         if (lower == "into") return TokenKind::kInto;
         if (lower == "values") return TokenKind::kValues;
@@ -573,9 +579,14 @@ private:
     lsmkv::Status ParseDropTable(Statement* out) {
         lex_.Advance();  // DROP
         RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kTable, "TABLE"));
+        DropTableStmt stmt;
+        // Optional: IF EXISTS
+        if (lex_.Match(TokenKind::kIf)) {
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kExists, "EXISTS"));
+            stmt.if_exists = true;
+        }
         std::string name;
         RELDB_RETURN_NOT_OK(ParseIdent(&name));
-        DropTableStmt stmt;
         stmt.table_name = std::move(name);
         *out = std::move(stmt);
         return STATUS(OK);

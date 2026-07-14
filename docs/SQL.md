@@ -192,7 +192,13 @@ ABORT;
 
 CREATE TABLE t(...);   -- OK (no open txn)
 DROP TABLE t;          -- OK (no open txn)
+DROP TABLE missing;    -- NotFound
+DROP TABLE IF EXISTS missing;  -- OK (no-op)
 ```
+
+**Missing table:** plain `DROP TABLE name` returns `NotFound` (same as
+`Database::DropTable`). `DROP TABLE IF EXISTS name` succeeds without error when
+the table is absent.
 
 **Session gate** is the clear error for the common `BEGIN; CREATE/DROP` mistake; the
 Database global DDL gate additionally blocks multi-client races.
@@ -217,7 +223,7 @@ commit_stmt   := COMMIT [ TRANSACTION ]
 abort_stmt    := ABORT | ROLLBACK [ TRANSACTION ]
 
 create_table  := CREATE TABLE name '(' col_def (',' col_def)* ')'
-drop_table    := DROP TABLE name
+drop_table    := DROP TABLE [ IF EXISTS ] name
 col_def       := name type [ PRIMARY KEY ]
 
 insert_stmt   := INSERT INTO name [ '(' names ')' ] VALUES '(' literals ')'

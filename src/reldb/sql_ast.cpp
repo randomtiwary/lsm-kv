@@ -59,7 +59,10 @@ std::string ToStringCreateTable(const CreateTableStmt& s) {
 }
 
 std::string ToStringDropTable(const DropTableStmt& s) {
-    return "DropTable(" + s.table_name + ")";
+    std::string out = "DropTable(";
+    if (s.if_exists) out += "IF EXISTS, ";
+    out += s.table_name + ")";
+    return out;
 }
 
 std::string ToStringInsert(const InsertStmt& s) {

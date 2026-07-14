@@ -169,13 +169,25 @@ TEST(reldb_sql_session_drop_table) {
         expect(session.Execute("SELECT * FROM users;", r).IsNotFound(), "gone");
         expect(session.Execute("INSERT INTO users VALUES (3, 'c');", r).IsNotFound(),
                "ins gone");
+        // Plain DROP of missing table → NotFound
         expect(session.Execute("DROP TABLE users;", r).IsNotFound(), "drop missing");
+        // IF EXISTS → success (no-op) when missing
+        EXPECT_OK(session.Execute("DROP TABLE IF EXISTS users;", r), "if exists missing");
+        EXPECT_OK(session.Execute("DROP TABLE IF EXISTS no_such_table;", r), "if exists never");
 
         // Recreate and use again
         EXPECT_OK(session.Execute(
                       "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);", r),
                   "recreate");
         EXPECT_OK(session.Execute("INSERT INTO users VALUES (9, 'z');", r), "ins3");
+        // IF EXISTS on an existing table still drops it
+        EXPECT_OK(session.Execute("DROP TABLE IF EXISTS users;", r), "if exists drop");
+        expect(session.Execute("SELECT * FROM users;", r).IsNotFound(), "gone after if");
+
+        EXPECT_OK(session.Execute(
+                      "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);", r),
+                  "recreate2");
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (9, 'z');", r), "ins4");
         EXPECT_OK(session.Execute("SELECT * FROM users;", r), "sel2");
         expect_eq(static_cast<int>(r.rows.size()), 1, "1 row");
     }

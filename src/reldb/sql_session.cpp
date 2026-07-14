@@ -237,8 +237,12 @@ lsmkv::Status SqlSession::RunCreateTable(const CreateTableStmt& stmt, QueryResul
 lsmkv::Status SqlSession::RunDropTable(const DropTableStmt& stmt, QueryResult& result) {
     result.Clear();
     RELDB_FAIL_IF(InTransaction(), InvalidArgument, "DDL is not allowed inside a transaction");
-    RELDB_RETURN_NOT_OK(db_->DropTable(stmt.table_name));
-    return STATUS(OK);
+    auto st = db_->DropTable(stmt.table_name);
+    // Plain DROP TABLE → NotFound if missing. IF EXISTS → success (no-op).
+    if (stmt.if_exists && st.IsNotFound()) {
+        return STATUS(OK);
+    }
+    return st;
 }
 
 lsmkv::Status SqlSession::RunInsert(InsertStmt stmt, QueryResult& result) {

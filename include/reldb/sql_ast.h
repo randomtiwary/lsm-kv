@@ -32,6 +32,8 @@ struct CreateTableStmt {
 
 struct DropTableStmt {
     std::string table_name;
+    // When true (DROP TABLE IF EXISTS), a missing table is not an error.
+    bool if_exists = false;
 };
 
 // Single-row INSERT.
