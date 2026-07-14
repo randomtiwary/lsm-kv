@@ -195,18 +195,19 @@ lsmkv::Status Database::AlterTableAddColumn(const std::string& table, const Colu
     ddl_in_progress_ = true;
     ScopedBool clear_ddl(ddl_in_progress_, false);
 
-    TableSchema old;
-    RELDB_RETURN_NOT_OK(catalog_->GetTable(table, &old));
-
+    // Cheap argument checks first (no catalog / KV), then load schema.
+    RELDB_FAIL_IF(col.name.empty(), InvalidArgument, "column name is empty");
     RELDB_FAIL_IF(col.primary_key, InvalidArgument,
                   "ALTER ADD COLUMN cannot add a PRIMARY KEY");
-    RELDB_FAIL_IF(col.name.empty(), InvalidArgument, "column name is empty");
-    RELDB_FAIL_IF(old.FindColumn(col.name) != nullptr, InvalidArgument,
-                  "column already exists: " + col.name);
     RELDB_FAIL_IF(default_value.IsNull(), InvalidArgument,
                   "ALTER ADD COLUMN requires a non-NULL DEFAULT");
     RELDB_FAIL_IF(default_value.type() != col.type, InvalidArgument,
                   "DEFAULT type does not match column type");
+
+    TableSchema old;
+    RELDB_RETURN_NOT_OK(catalog_->GetTable(table, &old));
+    RELDB_FAIL_IF(old.FindColumn(col.name) != nullptr, InvalidArgument,
+                  "column already exists: " + col.name);
 
     std::vector<ColumnDef> cols = old.columns();
     cols.push_back(col);
