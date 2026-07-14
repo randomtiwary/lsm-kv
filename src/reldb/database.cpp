@@ -189,13 +189,7 @@ lsmkv::Status Database::DropTable(const std::string& name) {
 
 lsmkv::Status Database::AlterTableAddColumn(const std::string& table, const ColumnDef& col,
                                             const Value& default_value) {
-    std::unique_lock<std::shared_mutex> lock(mu_);
-    RELDB_FAIL_IF(open_txn_count_ != 0, InvalidArgument, "DDL requires no open transactions");
-    RELDB_FAIL_IF(ddl_in_progress_, InvalidArgument, "DDL in progress");
-    ddl_in_progress_ = true;
-    ScopedBool clear_ddl(ddl_in_progress_, false);
-
-    // Cheap argument checks first (no catalog / KV), then load schema.
+    // Pure argument checks before mu_ (fail fast without contending for the lock).
     RELDB_FAIL_IF(col.name.empty(), InvalidArgument, "column name is empty");
     RELDB_FAIL_IF(col.primary_key, InvalidArgument,
                   "ALTER ADD COLUMN cannot add a PRIMARY KEY");
@@ -203,6 +197,12 @@ lsmkv::Status Database::AlterTableAddColumn(const std::string& table, const Colu
                   "ALTER ADD COLUMN requires a non-NULL DEFAULT");
     RELDB_FAIL_IF(default_value.type() != col.type, InvalidArgument,
                   "DEFAULT type does not match column type");
+
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    RELDB_FAIL_IF(open_txn_count_ != 0, InvalidArgument, "DDL requires no open transactions");
+    RELDB_FAIL_IF(ddl_in_progress_, InvalidArgument, "DDL in progress");
+    ddl_in_progress_ = true;
+    ScopedBool clear_ddl(ddl_in_progress_, false);
 
     TableSchema old;
     RELDB_RETURN_NOT_OK(catalog_->GetTable(table, &old));
@@ -298,13 +298,14 @@ lsmkv::Status Database::AlterTableAddColumn(const std::string& table, const Colu
 
 lsmkv::Status Database::AlterTableDropColumn(const std::string& table,
                                              const std::string& col_name) {
+    // Pure argument checks before mu_ (fail fast without contending for the lock).
+    RELDB_FAIL_IF(col_name.empty(), InvalidArgument, "column name is empty");
+
     std::unique_lock<std::shared_mutex> lock(mu_);
     RELDB_FAIL_IF(open_txn_count_ != 0, InvalidArgument, "DDL requires no open transactions");
     RELDB_FAIL_IF(ddl_in_progress_, InvalidArgument, "DDL in progress");
     ddl_in_progress_ = true;
     ScopedBool clear_ddl(ddl_in_progress_, false);
-
-    RELDB_FAIL_IF(col_name.empty(), InvalidArgument, "column name is empty");
 
     TableSchema old;
     RELDB_RETURN_NOT_OK(catalog_->GetTable(table, &old));
