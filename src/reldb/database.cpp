@@ -190,12 +190,8 @@ lsmkv::Status Database::DropTable(const std::string& name) {
 lsmkv::Status Database::AlterTableAddColumn(const std::string& table, const ColumnDef& col,
                                             const Value& default_value) {
     std::unique_lock<std::shared_mutex> lock(mu_);
-    if (open_txn_count_ != 0) {
-        return STATUS(InvalidArgument, "DDL requires no open transactions");
-    }
-    if (ddl_in_progress_) {
-        return STATUS(InvalidArgument, "DDL in progress");
-    }
+    RELDB_FAIL_IF(open_txn_count_ != 0, InvalidArgument, "DDL requires no open transactions");
+    RELDB_FAIL_IF(ddl_in_progress_, InvalidArgument, "DDL in progress");
     ddl_in_progress_ = true;
     ScopedBool clear_ddl(ddl_in_progress_, false);
 
