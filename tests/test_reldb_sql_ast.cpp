@@ -32,6 +32,20 @@ TEST(reldb_sql_ast_create_table_print) {
               "print");
 }
 
+TEST(reldb_sql_ast_drop_table_print) {
+    reldb::DropTableStmt dt;
+    dt.table_name = "users";
+    reldb::Statement s = std::move(dt);
+    expect(reldb::IsDropTable(s), "kind");
+    expect_eq(reldb::ToString(s), std::string("DropTable(users)"), "print");
+
+    reldb::DropTableStmt dt2;
+    dt2.table_name = "users";
+    dt2.if_exists = true;
+    reldb::Statement s2 = std::move(dt2);
+    expect_eq(reldb::ToString(s2), std::string("DropTable(IF EXISTS, users)"), "if exists");
+}
+
 TEST(reldb_sql_ast_insert_print) {
     reldb::InsertStmt ins;
     ins.table_name = "users";

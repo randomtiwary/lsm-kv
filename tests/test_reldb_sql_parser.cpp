@@ -79,6 +79,29 @@ TEST(reldb_sql_parse_create_table) {
            "two pk");
 }
 
+TEST(reldb_sql_parse_drop_table) {
+    reldb::Statement s;
+    EXPECT_OK(reldb::ParseStatement("DROP TABLE users", &s), "drop");
+    expect(reldb::IsDropTable(s), "kind");
+    expect_eq(std::get<reldb::DropTableStmt>(s).table_name, std::string("users"), "name");
+    expect(!std::get<reldb::DropTableStmt>(s).if_exists, "no if exists");
+    expect_eq(reldb::ToString(s), std::string("DropTable(users)"), "print");
+
+    EXPECT_OK(reldb::ParseStatement("DROP TABLE IF EXISTS users", &s), "if exists");
+    expect(reldb::IsDropTable(s), "kind if");
+    expect(std::get<reldb::DropTableStmt>(s).if_exists, "if exists flag");
+    expect_eq(std::get<reldb::DropTableStmt>(s).table_name, std::string("users"), "name if");
+    expect_eq(reldb::ToString(s), std::string("DropTable(IF EXISTS, users)"), "print if");
+
+    // Missing table name
+    expect(reldb::ParseStatement("DROP TABLE", &s).IsInvalidArgument(), "no name");
+    expect(reldb::ParseStatement("DROP TABLE IF EXISTS", &s).IsInvalidArgument(), "if no name");
+    // DROP without TABLE
+    expect(reldb::ParseStatement("DROP users", &s).IsInvalidArgument(), "no TABLE");
+    // IF without EXISTS
+    expect(reldb::ParseStatement("DROP TABLE IF users", &s).IsInvalidArgument(), "if no exists");
+}
+
 TEST(reldb_sql_parse_insert) {
     reldb::Statement s;
     EXPECT_OK(reldb::ParseStatement(

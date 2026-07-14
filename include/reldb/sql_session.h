@@ -21,7 +21,8 @@ class Executor;
 // Session state:
 //   - Optional open transaction (BEGIN / COMMIT / ABORT).
 //   - DML and SELECT outside a transaction use an auto-commit txn.
-//   - CREATE TABLE is non-transactional and is rejected while InTransaction().
+//   - DDL (CREATE/DROP TABLE) is non-transactional and is rejected while
+//     InTransaction(); Database also enforces the global open-txn DDL gate.
 //
 // Ownership: holds shared_ptr to Database; owns the open Transaction if any.
 class SqlSession {
@@ -40,6 +41,7 @@ private:
     lsmkv::Status RunCommit(QueryResult& result);
     lsmkv::Status RunAbort(QueryResult& result);
     lsmkv::Status RunCreateTable(const CreateTableStmt& stmt, QueryResult& result);
+    lsmkv::Status RunDropTable(const DropTableStmt& stmt, QueryResult& result);
     lsmkv::Status RunInsert(InsertStmt stmt, QueryResult& result);
     lsmkv::Status RunSelect(SelectStmt stmt, QueryResult& result);
     lsmkv::Status RunUpdate(UpdateStmt stmt, QueryResult& result);
