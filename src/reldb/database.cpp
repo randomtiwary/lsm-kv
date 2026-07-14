@@ -22,9 +22,7 @@ const char kNextVidKey[] = "m/next_vid";
 // Collect all user keys under prefix, destroy the iterator, then Delete each.
 // Do not Delete while an iterator over the same DB is live (invalidation).
 lsmkv::Status DeleteKeyPrefix(lsmkv::DB* db, const std::string& prefix) {
-    if (db == nullptr) {
-        return STATUS(InvalidArgument, "null db");
-    }
+    LSMKV_DCHECK(db != nullptr);
     std::vector<std::string> keys;
     {
         auto it = db->NewIterator(lsmkv::ReadOptions());
