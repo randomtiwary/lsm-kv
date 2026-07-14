@@ -79,6 +79,19 @@ TEST(reldb_sql_parse_create_table) {
            "two pk");
 }
 
+TEST(reldb_sql_parse_drop_table) {
+    reldb::Statement s;
+    EXPECT_OK(reldb::ParseStatement("DROP TABLE users", &s), "drop");
+    expect(reldb::IsDropTable(s), "kind");
+    expect_eq(std::get<reldb::DropTableStmt>(s).table_name, std::string("users"), "name");
+    expect_eq(reldb::ToString(s), std::string("DropTable(users)"), "print");
+
+    // Missing table name
+    expect(reldb::ParseStatement("DROP TABLE", &s).IsInvalidArgument(), "no name");
+    // DROP without TABLE
+    expect(reldb::ParseStatement("DROP users", &s).IsInvalidArgument(), "no TABLE");
+}
+
 TEST(reldb_sql_parse_insert) {
     reldb::Statement s;
     EXPECT_OK(reldb::ParseStatement(

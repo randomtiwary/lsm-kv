@@ -58,6 +58,10 @@ std::string ToStringCreateTable(const CreateTableStmt& s) {
     return "CreateTable(" + s.table_name + ", [" + JoinComma(cols) + "])";
 }
 
+std::string ToStringDropTable(const DropTableStmt& s) {
+    return "DropTable(" + s.table_name + ")";
+}
+
 std::string ToStringInsert(const InsertStmt& s) {
     std::string out = "Insert(" + s.table_name;
     if (!s.column_names.empty()) {
@@ -140,6 +144,8 @@ std::string ToString(const Statement& stmt) {
                 return ToStringAbort(node);
             } else if constexpr (std::is_same_v<T, CreateTableStmt>) {
                 return ToStringCreateTable(node);
+            } else if constexpr (std::is_same_v<T, DropTableStmt>) {
+                return ToStringDropTable(node);
             } else if constexpr (std::is_same_v<T, InsertStmt>) {
                 return ToStringInsert(node);
             } else if constexpr (std::is_same_v<T, SelectStmt>) {

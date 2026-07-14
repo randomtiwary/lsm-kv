@@ -129,10 +129,13 @@ TEST(reldb_sql_session_txn_errors_and_ddl_gate) {
         // DDL inside txn rejected; catalog unchanged for new table
         expect(session.Execute("CREATE TABLE u(id INT PRIMARY KEY);", r).IsInvalidArgument(),
                "ddl in txn");
+        expect(session.Execute("DROP TABLE t;", r).IsInvalidArgument(), "drop in txn");
         EXPECT_OK(session.Execute("ABORT;", r), "abort");
 
         // u should not exist — insert fails
         expect(!session.Execute("INSERT INTO u VALUES (1);", r).ok(), "no u");
+        // t still exists (drop was blocked)
+        EXPECT_OK(session.Execute("INSERT INTO t VALUES (1);", r), "t remains");
 
         // COMMIT without BEGIN
         expect(session.Execute("COMMIT;", r).IsInvalidArgument(), "commit none");
@@ -141,6 +144,40 @@ TEST(reldb_sql_session_txn_errors_and_ddl_gate) {
         // DDL OK outside txn
         EXPECT_OK(session.Execute("CREATE TABLE u(id INT PRIMARY KEY);", r), "create u");
         EXPECT_OK(session.Execute("INSERT INTO u VALUES (1);", r), "ins u");
+    }
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_sql_session_drop_table) {
+    auto dir = MakeTempDir("reldb_sql_sess_drop");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        reldb::SqlSession session(db);
+        reldb::QueryResult r;
+
+        EXPECT_OK(session.Execute(
+                      "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);", r),
+                  "create");
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (1, 'a');", r), "ins");
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (2, 'b');", r), "ins2");
+        EXPECT_OK(session.Execute("SELECT * FROM users;", r), "sel");
+        expect_eq(static_cast<int>(r.rows.size()), 2, "2 rows");
+
+        EXPECT_OK(session.Execute("DROP TABLE users;", r), "drop");
+
+        expect(session.Execute("SELECT * FROM users;", r).IsNotFound(), "gone");
+        expect(session.Execute("INSERT INTO users VALUES (3, 'c');", r).IsNotFound(),
+               "ins gone");
+        expect(session.Execute("DROP TABLE users;", r).IsNotFound(), "drop missing");
+
+        // Recreate and use again
+        EXPECT_OK(session.Execute(
+                      "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);", r),
+                  "recreate");
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (9, 'z');", r), "ins3");
+        EXPECT_OK(session.Execute("SELECT * FROM users;", r), "sel2");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "1 row");
     }
     RemoveDirRecursive(dir);
 }

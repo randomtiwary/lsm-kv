@@ -179,6 +179,8 @@ lsmkv::Status SqlSession::RunStatement(Statement stmt, QueryResult& result) {
                 return RunAbort(result);
             } else if constexpr (std::is_same_v<T, CreateTableStmt>) {
                 return RunCreateTable(node, result);
+            } else if constexpr (std::is_same_v<T, DropTableStmt>) {
+                return RunDropTable(node, result);
             } else if constexpr (std::is_same_v<T, InsertStmt>) {
                 return RunInsert(std::move(node), result);
             } else if constexpr (std::is_same_v<T, SelectStmt>) {
@@ -229,6 +231,13 @@ lsmkv::Status SqlSession::RunCreateTable(const CreateTableStmt& stmt, QueryResul
     TableSchema schema(stmt.table_name, std::move(cols));
     RELDB_RETURN_NOT_OK(schema.Validate());
     RELDB_RETURN_NOT_OK(db_->CreateTable(schema));
+    return STATUS(OK);
+}
+
+lsmkv::Status SqlSession::RunDropTable(const DropTableStmt& stmt, QueryResult& result) {
+    result.Clear();
+    RELDB_FAIL_IF(InTransaction(), InvalidArgument, "DDL is not allowed inside a transaction");
+    RELDB_RETURN_NOT_OK(db_->DropTable(stmt.table_name));
     return STATUS(OK);
 }
 

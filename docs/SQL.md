@@ -25,7 +25,8 @@ tests that show *why* a plan chose a point lookup vs a table scan.
 
 ## Goals (v1)
 
-- SQL **DDL**: `CREATE TABLE` (still **non-transactional**, same as `Database::CreateTable`)
+- SQL **DDL**: `CREATE TABLE`, `DROP TABLE` (still **non-transactional**, same as
+  `Database::CreateTable` / `Database::DropTable`)
 - SQL **txn control**: `BEGIN`, `COMMIT`, `ABORT` / `ROLLBACK` (thin wrappers over reldb txn API)
 - SQL **DML**: `INSERT`, `SELECT`, `UPDATE`, `DELETE` with simple `WHERE` / `ORDER BY` / `LIMIT`
 - **Scan** support under SI (same visibility as `Transaction::Get`)
@@ -153,7 +154,7 @@ class SqlSession {
 | `COMMIT` | If no txn → error. Else `Commit()`, release txn. |
 | `ABORT` / `ROLLBACK` | If no txn → error. Else `Abort()`, release txn. |
 | DML / `SELECT` | If no open txn → **auto-txn**: begin, run, commit (or abort on error). If open txn → run inside it. |
-| `CREATE TABLE` | See **DDL is forbidden inside a transaction** below. |
+| `CREATE TABLE` / `DROP TABLE` | See **DDL is forbidden inside a transaction** below. |
 
 **Autocommit for single statements** avoids forcing `BEGIN` for every demo, while
 `BEGIN`…`COMMIT` enables multi-statement SI snapshots.
@@ -170,9 +171,9 @@ C++ API after failed commit).
 
 ### DDL is forbidden inside a transaction
 
-DDL (`CREATE TABLE` today; any later DDL) is **non-transactional** in reldb: it applies
-immediately and is **not** rolled back by `ABORT`. Allowing it inside `BEGIN`…`COMMIT`
-would be misleading (looks transactional, is not).
+DDL (`CREATE TABLE`, `DROP TABLE`; later `ALTER`) is **non-transactional** in reldb: it
+applies immediately and is **not** rolled back by `ABORT`. Allowing it inside
+`BEGIN`…`COMMIT` would be misleading (looks transactional, is not).
 
 **Rule (v1, locked):**
 
@@ -180,23 +181,21 @@ would be misleading (looks transactional, is not).
   DDL statement must fail with a clear `InvalidArgument` (or similar) **before**
   mutating the catalog.
 - DDL is only allowed when the session is **not** in a transaction.
-- Outside a txn, `CREATE TABLE` still goes through `Database::CreateTable` (immediate).
+- Outside a txn, `CREATE TABLE` / `DROP TABLE` go through `Database::CreateTable` /
+  `Database::DropTable` (immediate; Database also requires no open user txns).
 
 ```text
 BEGIN;
 CREATE TABLE t(...);   -- ERROR: DDL not allowed inside a transaction
+DROP TABLE t;          -- ERROR: same session gate
 ABORT;
 
 CREATE TABLE t(...);   -- OK (no open txn)
-BEGIN;
-INSERT INTO t ...;
-COMMIT;
+DROP TABLE t;          -- OK (no open txn)
 ```
 
-**Implementation timing:** enforce in `SqlSession::Execute` when the statement is DDL
-(PR **06** session work, or a small follow-up PR right after 06 if session lands
-without it). Parser may still accept `CREATE TABLE` text; the **session gate** is the
-source of truth. Unit test: `BEGIN` then `CREATE TABLE` → error; catalog unchanged.
+**Session gate** is the clear error for the common `BEGIN; CREATE/DROP` mistake; the
+Database global DDL gate additionally blocks multi-client races.
 
 ## SQL dialect (v1)
 
@@ -210,7 +209,7 @@ Map to existing `ColumnType`: `INT` / `INTEGER` → Int64, `TEXT` / `STRING` →
 ```
 script        := statement ( ';' statement )* ';'?
 statement     := begin_stmt | commit_stmt | abort_stmt
-               | create_table | insert_stmt | select_stmt
+               | create_table | drop_table | insert_stmt | select_stmt
                | update_stmt | delete_stmt
 
 begin_stmt    := BEGIN [ TRANSACTION ]
@@ -218,6 +217,7 @@ commit_stmt   := COMMIT [ TRANSACTION ]
 abort_stmt    := ABORT | ROLLBACK [ TRANSACTION ]
 
 create_table  := CREATE TABLE name '(' col_def (',' col_def)* ')'
+drop_table    := DROP TABLE name
 col_def       := name type [ PRIMARY KEY ]
 
 insert_stmt   := INSERT INTO name [ '(' names ')' ] VALUES '(' literals ')'
@@ -333,7 +333,7 @@ Do not require both to interleave on the same session object in v1 (document if
 | Bind + optimizer | `WHERE id = 1` → point; residual → scan+filter (`EXPLAIN`) |
 | SQL e2e | BEGIN/INSERT/SELECT/COMMIT; autocommit SELECT; conflict on commit |
 | Session | Double BEGIN errors; COMMIT without BEGIN errors |
-| DDL vs txn | `BEGIN` + `CREATE TABLE` → error, catalog unchanged; DDL OK with no open txn |
+| DDL vs txn | `BEGIN` + `CREATE`/`DROP TABLE` → error, catalog unchanged; DDL OK with no open txn |
 
 ## PR plan (all target `feature/sql-layer`)
 

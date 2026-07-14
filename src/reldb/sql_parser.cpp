@@ -26,6 +26,7 @@ enum class TokenKind : std::uint8_t {
     kRollback,
     kTransaction,
     kCreate,
+    kDrop,
     kTable,
     kInsert,
     kInto,
@@ -98,6 +99,7 @@ const char* TokenKindName(TokenKind k) {
         case TokenKind::kRollback: return "ROLLBACK";
         case TokenKind::kTransaction: return "TRANSACTION";
         case TokenKind::kCreate: return "CREATE";
+        case TokenKind::kDrop: return "DROP";
         case TokenKind::kTable: return "TABLE";
         case TokenKind::kInsert: return "INSERT";
         case TokenKind::kInto: return "INTO";
@@ -364,6 +366,7 @@ private:
         if (lower == "rollback") return TokenKind::kRollback;
         if (lower == "transaction") return TokenKind::kTransaction;
         if (lower == "create") return TokenKind::kCreate;
+        if (lower == "drop") return TokenKind::kDrop;
         if (lower == "table") return TokenKind::kTable;
         if (lower == "insert") return TokenKind::kInsert;
         if (lower == "into") return TokenKind::kInto;
@@ -476,6 +479,8 @@ private:
                 return ParseAbort(out);
             case TokenKind::kCreate:
                 return ParseCreateTable(out);
+            case TokenKind::kDrop:
+                return ParseDropTable(out);
             case TokenKind::kInsert:
                 return ParseInsert(out);
             case TokenKind::kSelect:
@@ -561,6 +566,17 @@ private:
         if (pk_count != 1) {
             return lex_.Error("CREATE TABLE requires exactly one PRIMARY KEY column");
         }
+        *out = std::move(stmt);
+        return STATUS(OK);
+    }
+
+    lsmkv::Status ParseDropTable(Statement* out) {
+        lex_.Advance();  // DROP
+        RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kTable, "TABLE"));
+        std::string name;
+        RELDB_RETURN_NOT_OK(ParseIdent(&name));
+        DropTableStmt stmt;
+        stmt.table_name = std::move(name);
         *out = std::move(stmt);
         return STATUS(OK);
     }
