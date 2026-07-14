@@ -12,6 +12,7 @@
 #include "reldb/catalog.h"
 #include "reldb/mvcc.h"
 #include "reldb/schema.h"
+#include "reldb/types.h"
 
 namespace reldb {
 
@@ -43,6 +44,13 @@ public:
     // v/<name>/ prefixes (collect keys, then Delete — no live iterator across
     // Delete). NotFound if the table is missing. Same DDL gate as CreateTable.
     lsmkv::Status DropTable(const std::string& name);
+
+    // ALTER TABLE ADD COLUMN: append col (not PK) with a required non-Null
+    // default matching col.type. Collects head PKs, then installs committed
+    // rewritten heads (collect-then-rewrite; no txn Begin/Commit under mu_).
+    // Same DDL gate as CreateTable. NotFound if the table is missing.
+    lsmkv::Status AlterTableAddColumn(const std::string& table, const ColumnDef& col,
+                                      const Value& default_value);
 
     // Catalog lookup. Uses a shared lock on cache hits; upgrades to exclusive
     // only when loading from KV / filling the cache (double-checked).
