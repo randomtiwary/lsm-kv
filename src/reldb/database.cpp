@@ -9,6 +9,8 @@
 #include "lsmkv/options.h"
 #include "lsmkv/slice.h"
 #include "reldb/macros.h"
+#include "reldb/mvcc.h"
+#include "reldb/row.h"
 #include "reldb/scoped_util.h"
 #include "reldb/txn.h"
 
@@ -182,6 +184,115 @@ lsmkv::Status Database::DropTable(const std::string& name) {
     // Eager GC of row heads and version payloads (collect-then-delete).
     RELDB_RETURN_NOT_OK(DeleteKeyPrefix(kv_.get(), "d/" + name + "/"));
     RELDB_RETURN_NOT_OK(DeleteKeyPrefix(kv_.get(), "v/" + name + "/"));
+    return STATUS(OK);
+}
+
+lsmkv::Status Database::AlterTableAddColumn(const std::string& table, const ColumnDef& col,
+                                            const Value& default_value) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    RELDB_FAIL_IF(open_txn_count_ != 0, InvalidArgument, "DDL requires no open transactions");
+    RELDB_FAIL_IF(ddl_in_progress_, InvalidArgument, "DDL in progress");
+    ddl_in_progress_ = true;
+    ScopedBool clear_ddl(ddl_in_progress_, false);
+
+    // Cheap argument checks first (no catalog / KV), then load schema.
+    RELDB_FAIL_IF(col.name.empty(), InvalidArgument, "column name is empty");
+    RELDB_FAIL_IF(col.primary_key, InvalidArgument,
+                  "ALTER ADD COLUMN cannot add a PRIMARY KEY");
+    RELDB_FAIL_IF(default_value.IsNull(), InvalidArgument,
+                  "ALTER ADD COLUMN requires a non-NULL DEFAULT");
+    RELDB_FAIL_IF(default_value.type() != col.type, InvalidArgument,
+                  "DEFAULT type does not match column type");
+
+    TableSchema old;
+    RELDB_RETURN_NOT_OK(catalog_->GetTable(table, &old));
+    RELDB_FAIL_IF(old.FindColumn(col.name) != nullptr, InvalidArgument,
+                  "column already exists: " + col.name);
+
+    std::vector<ColumnDef> cols = old.columns();
+    cols.push_back(col);
+    TableSchema neu(old.name(), std::move(cols));
+    RELDB_RETURN_NOT_OK(neu.Validate());
+
+    // Phase 1: collect PKs from row heads (read-only; destroy iterator before
+    // any PutVersion / SetHead).
+    std::vector<Value> pks;
+    {
+        const std::string prefix = "d/" + table + "/";
+        auto it = kv_->NewIterator(lsmkv::ReadOptions());
+        it->Seek(prefix);
+        while (it->Valid() && it->key().starts_with(prefix)) {
+            const std::string key = it->key().ToString();
+            const std::string pk_hex = key.substr(prefix.size());
+            Value pk;
+            RELDB_RETURN_NOT_OK(DecodePkFromKey(pk_hex, &pk));
+            pks.push_back(std::move(pk));
+            it->Next();
+        }
+        RELDB_RETURN_NOT_OK(it->status());
+    }
+
+    // Phase 2: rewrite live committed heads at the new width.
+    // One commit_ts for the DDL; historical chain keeps old-width payloads.
+    const Timestamp commit_ts = next_ts_++;
+    for (const Value& pk : pks) {
+        Timestamp head_id = 0;
+        RELDB_RETURN_NOT_OK(store_->GetLatestVersionId(table, pk, &head_id));
+
+        VersionRecord prior;
+        RELDB_RETURN_NOT_OK(store_->GetVersion(table, pk, head_id, &prior));
+
+        // With open_txn_count_ == 0 there should be no live provisional heads.
+        // Walk prev if we ever see one (e.g. leftover after recovery).
+        while (prior.is_provisional()) {
+            if (prior.prev_id == 0) {
+                // Orphan provisional with no committed ancestor — skip.
+                prior.is_tombstone = true;
+                break;
+            }
+            RELDB_RETURN_NOT_OK(store_->GetVersion(table, pk, prior.prev_id, &prior));
+        }
+
+        // Deleted rows (live tombstone heads) need no new column.
+        if (prior.is_tombstone) {
+            continue;
+        }
+        // Head should be the live version (end_ts == 0). If already closed, skip.
+        if (prior.end_ts != 0) {
+            continue;
+        }
+        if (prior.start_ts == 0) {
+            return STATUS(Corruption, "ALTER: unexpected provisional head");
+        }
+
+        Row row;
+        RELDB_RETURN_NOT_OK(Row::Decode(prior.payload, &row));
+        if (row.size() == neu.num_columns()) {
+            // Already at new width (retry / partial prior run).
+            continue;
+        }
+        if (row.size() != old.num_columns()) {
+            return STATUS(Corruption, "ALTER: row width does not match schema");
+        }
+        row.push_back(default_value);
+        RELDB_RETURN_NOT_OK(row.ValidateAgainst(neu));
+
+        prior.end_ts = commit_ts;
+        RELDB_RETURN_NOT_OK(store_->PutVersionValue(table, pk, prior));
+
+        VersionRecord neu_rec;
+        neu_rec.version_id = next_version_id_++;
+        neu_rec.start_ts = commit_ts;
+        neu_rec.end_ts = 0;
+        neu_rec.prev_id = prior.version_id;
+        neu_rec.created_by = 0;  // DDL system install (not a user txn)
+        neu_rec.is_tombstone = false;
+        neu_rec.payload = row.Encode();
+        RELDB_RETURN_NOT_OK(store_->PutVersion(table, pk, neu_rec));
+    }
+
+    RELDB_RETURN_NOT_OK(PersistOracles());
+    RELDB_RETURN_NOT_OK(catalog_->PutTable(neu));
     return STATUS(OK);
 }
 
