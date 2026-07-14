@@ -27,6 +27,10 @@ enum class TokenKind : std::uint8_t {
     kTransaction,
     kCreate,
     kDrop,
+    kAlter,
+    kAdd,
+    kColumn,
+    kDefault,
     kTable,
     kIf,
     kExists,
@@ -102,6 +106,10 @@ const char* TokenKindName(TokenKind k) {
         case TokenKind::kTransaction: return "TRANSACTION";
         case TokenKind::kCreate: return "CREATE";
         case TokenKind::kDrop: return "DROP";
+        case TokenKind::kAlter: return "ALTER";
+        case TokenKind::kAdd: return "ADD";
+        case TokenKind::kColumn: return "COLUMN";
+        case TokenKind::kDefault: return "DEFAULT";
         case TokenKind::kTable: return "TABLE";
         case TokenKind::kIf: return "IF";
         case TokenKind::kExists: return "EXISTS";
@@ -371,6 +379,10 @@ private:
         if (lower == "transaction") return TokenKind::kTransaction;
         if (lower == "create") return TokenKind::kCreate;
         if (lower == "drop") return TokenKind::kDrop;
+        if (lower == "alter") return TokenKind::kAlter;
+        if (lower == "add") return TokenKind::kAdd;
+        if (lower == "column") return TokenKind::kColumn;
+        if (lower == "default") return TokenKind::kDefault;
         if (lower == "table") return TokenKind::kTable;
         if (lower == "if") return TokenKind::kIf;
         if (lower == "exists") return TokenKind::kExists;
@@ -487,6 +499,8 @@ private:
                 return ParseCreateTable(out);
             case TokenKind::kDrop:
                 return ParseDropTable(out);
+            case TokenKind::kAlter:
+                return ParseAlterTable(out);
             case TokenKind::kInsert:
                 return ParseInsert(out);
             case TokenKind::kSelect:
@@ -590,6 +604,44 @@ private:
         stmt.table_name = std::move(name);
         *out = std::move(stmt);
         return STATUS(OK);
+    }
+
+    // ALTER TABLE name ( ADD COLUMN name type DEFAULT literal
+    //                  | DROP COLUMN name )
+    lsmkv::Status ParseAlterTable(Statement* out) {
+        lex_.Advance();  // ALTER
+        RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kTable, "TABLE"));
+        std::string table;
+        RELDB_RETURN_NOT_OK(ParseIdent(&table));
+
+        if (lex_.Match(TokenKind::kAdd)) {
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kColumn, "COLUMN"));
+            AlterTableAddColumnStmt stmt;
+            stmt.table_name = std::move(table);
+            RELDB_RETURN_NOT_OK(ParseIdent(&stmt.column.name));
+            RELDB_RETURN_NOT_OK(ParseColumnType(&stmt.column.type));
+            // ALTER ADD does not allow PRIMARY KEY (grammar: alter_col_def := name type).
+            if (lex_.Match(TokenKind::kPrimary)) {
+                return lex_.Error("ALTER ADD COLUMN cannot add a PRIMARY KEY");
+            }
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kDefault, "DEFAULT"));
+            RELDB_RETURN_NOT_OK(ParseLiteralValue(&stmt.default_value));
+            stmt.column.primary_key = false;
+            *out = std::move(stmt);
+            return STATUS(OK);
+        }
+
+        if (lex_.Match(TokenKind::kDrop)) {
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kColumn, "COLUMN"));
+            AlterTableDropColumnStmt stmt;
+            stmt.table_name = std::move(table);
+            RELDB_RETURN_NOT_OK(ParseIdent(&stmt.column_name));
+            *out = std::move(stmt);
+            return STATUS(OK);
+        }
+
+        return lex_.Error(std::string("expected ADD or DROP after ALTER TABLE, got ") +
+                          TokenKindName(lex_.current().kind));
     }
 
     lsmkv::Status ParseColumnType(ColumnType* out) {

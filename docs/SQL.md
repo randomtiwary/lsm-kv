@@ -25,8 +25,8 @@ tests that show *why* a plan chose a point lookup vs a table scan.
 
 ## Goals (v1)
 
-- SQL **DDL**: `CREATE TABLE`, `DROP TABLE` (still **non-transactional**, same as
-  `Database::CreateTable` / `Database::DropTable`)
+- SQL **DDL**: `CREATE TABLE`, `DROP TABLE`, `ALTER TABLE ADD/DROP COLUMN` (still
+  **non-transactional**, same as the corresponding `Database::*` APIs)
 - SQL **txn control**: `BEGIN`, `COMMIT`, `ABORT` / `ROLLBACK` (thin wrappers over reldb txn API)
 - SQL **DML**: `INSERT`, `SELECT`, `UPDATE`, `DELETE` with simple `WHERE` / `ORDER BY` / `LIMIT`
 - **Scan** support under SI (same visibility as `Transaction::Get`)
@@ -154,7 +154,7 @@ class SqlSession {
 | `COMMIT` | If no txn → error. Else `Commit()`, release txn. |
 | `ABORT` / `ROLLBACK` | If no txn → error. Else `Abort()`, release txn. |
 | DML / `SELECT` | If no open txn → **auto-txn**: begin, run, commit (or abort on error). If open txn → run inside it. |
-| `CREATE TABLE` / `DROP TABLE` | See **DDL is forbidden inside a transaction** below. |
+| `CREATE` / `DROP` / `ALTER TABLE` | See **DDL is forbidden inside a transaction** below. |
 
 **Autocommit for single statements** avoids forcing `BEGIN` for every demo, while
 `BEGIN`…`COMMIT` enables multi-statement SI snapshots.
@@ -171,8 +171,8 @@ C++ API after failed commit).
 
 ### DDL is forbidden inside a transaction
 
-DDL (`CREATE TABLE`, `DROP TABLE`; later `ALTER`) is **non-transactional** in reldb: it
-applies immediately and is **not** rolled back by `ABORT`. Allowing it inside
+DDL (`CREATE` / `DROP` / `ALTER TABLE`) is **non-transactional** in reldb: it applies
+immediately and is **not** rolled back by `ABORT`. Allowing it inside
 `BEGIN`…`COMMIT` would be misleading (looks transactional, is not).
 
 **Rule (v1, locked):**
@@ -181,27 +181,33 @@ applies immediately and is **not** rolled back by `ABORT`. Allowing it inside
   DDL statement must fail with a clear `InvalidArgument` (or similar) **before**
   mutating the catalog.
 - DDL is only allowed when the session is **not** in a transaction.
-- Outside a txn, `CREATE TABLE` / `DROP TABLE` go through `Database::CreateTable` /
-  `Database::DropTable` (immediate; Database also requires no open user txns).
+- Outside a txn, DDL goes through `Database::CreateTable` / `DropTable` /
+  `AlterTableAddColumn` / `AlterTableDropColumn` (immediate; Database also requires
+  no open user txns).
 
 ```text
 BEGIN;
 CREATE TABLE t(...);   -- ERROR: DDL not allowed inside a transaction
-DROP TABLE t;          -- ERROR: same session gate
+ALTER TABLE t ADD COLUMN x INT DEFAULT 0;  -- ERROR: same session gate
 ABORT;
 
-CREATE TABLE t(...);   -- OK (no open txn)
-DROP TABLE t;          -- OK (no open txn)
-DROP TABLE missing;    -- NotFound
-DROP TABLE IF EXISTS missing;  -- OK (no-op)
+CREATE TABLE t(id INT PRIMARY KEY, name TEXT);
+ALTER TABLE t ADD COLUMN age INT DEFAULT 0;  -- OK
+ALTER TABLE t DROP COLUMN age;               -- OK (not PK)
+DROP TABLE t;
+DROP TABLE missing;              -- NotFound
+DROP TABLE IF EXISTS missing;    -- OK (no-op)
 ```
 
 **Missing table:** plain `DROP TABLE name` returns `NotFound` (same as
 `Database::DropTable`). `DROP TABLE IF EXISTS name` succeeds without error when
 the table is absent.
 
-**Session gate** is the clear error for the common `BEGIN; CREATE/DROP` mistake; the
-Database global DDL gate additionally blocks multi-client races.
+**ALTER rules:** ADD COLUMN requires `DEFAULT <literal>` (non-NULL, type-matched);
+cannot add a PRIMARY KEY. DROP COLUMN cannot drop the PRIMARY KEY column.
+
+**Session gate** is the clear error for the common `BEGIN; CREATE/DROP/ALTER` mistake;
+the Database global DDL gate additionally blocks multi-client races.
 
 ## SQL dialect (v1)
 
@@ -215,8 +221,8 @@ Map to existing `ColumnType`: `INT` / `INTEGER` → Int64, `TEXT` / `STRING` →
 ```
 script        := statement ( ';' statement )* ';'?
 statement     := begin_stmt | commit_stmt | abort_stmt
-               | create_table | drop_table | insert_stmt | select_stmt
-               | update_stmt | delete_stmt
+               | create_table | drop_table | alter_table
+               | insert_stmt | select_stmt | update_stmt | delete_stmt
 
 begin_stmt    := BEGIN [ TRANSACTION ]
 commit_stmt   := COMMIT [ TRANSACTION ]
@@ -224,7 +230,11 @@ abort_stmt    := ABORT | ROLLBACK [ TRANSACTION ]
 
 create_table  := CREATE TABLE name '(' col_def (',' col_def)* ')'
 drop_table    := DROP TABLE [ IF EXISTS ] name
+alter_table   := ALTER TABLE name alter_action
+alter_action  := ADD COLUMN alter_col_def DEFAULT literal
+               | DROP COLUMN name
 col_def       := name type [ PRIMARY KEY ]
+alter_col_def := name type   -- no PRIMARY KEY on ALTER ADD
 
 insert_stmt   := INSERT INTO name [ '(' names ')' ] VALUES '(' literals ')'
 select_stmt   := SELECT select_list FROM name

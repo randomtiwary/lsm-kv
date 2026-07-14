@@ -181,6 +181,10 @@ lsmkv::Status SqlSession::RunStatement(Statement stmt, QueryResult& result) {
                 return RunCreateTable(node, result);
             } else if constexpr (std::is_same_v<T, DropTableStmt>) {
                 return RunDropTable(node, result);
+            } else if constexpr (std::is_same_v<T, AlterTableAddColumnStmt>) {
+                return RunAlterTableAddColumn(node, result);
+            } else if constexpr (std::is_same_v<T, AlterTableDropColumnStmt>) {
+                return RunAlterTableDropColumn(node, result);
             } else if constexpr (std::is_same_v<T, InsertStmt>) {
                 return RunInsert(std::move(node), result);
             } else if constexpr (std::is_same_v<T, SelectStmt>) {
@@ -243,6 +247,21 @@ lsmkv::Status SqlSession::RunDropTable(const DropTableStmt& stmt, QueryResult& r
         return STATUS(OK);
     }
     return st;
+}
+
+lsmkv::Status SqlSession::RunAlterTableAddColumn(const AlterTableAddColumnStmt& stmt,
+                                                 QueryResult& result) {
+    result.Clear();
+    RELDB_FAIL_IF(InTransaction(), InvalidArgument, "DDL is not allowed inside a transaction");
+    ColumnDef col{stmt.column.name, stmt.column.type, /*primary_key=*/false};
+    return db_->AlterTableAddColumn(stmt.table_name, col, stmt.default_value);
+}
+
+lsmkv::Status SqlSession::RunAlterTableDropColumn(const AlterTableDropColumnStmt& stmt,
+                                                  QueryResult& result) {
+    result.Clear();
+    RELDB_FAIL_IF(InTransaction(), InvalidArgument, "DDL is not allowed inside a transaction");
+    return db_->AlterTableDropColumn(stmt.table_name, stmt.column_name);
 }
 
 lsmkv::Status SqlSession::RunInsert(InsertStmt stmt, QueryResult& result) {

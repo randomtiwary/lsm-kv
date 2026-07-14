@@ -102,6 +102,49 @@ TEST(reldb_sql_parse_drop_table) {
     expect(reldb::ParseStatement("DROP TABLE IF users", &s).IsInvalidArgument(), "if no exists");
 }
 
+TEST(reldb_sql_parse_alter_table) {
+    reldb::Statement s;
+    EXPECT_OK(reldb::ParseStatement(
+                  "ALTER TABLE users ADD COLUMN age INT DEFAULT 0", &s),
+              "add");
+    expect(reldb::IsAlterTableAddColumn(s), "add kind");
+    const auto& add = std::get<reldb::AlterTableAddColumnStmt>(s);
+    expect_eq(add.table_name, std::string("users"), "table");
+    expect_eq(add.column.name, std::string("age"), "col");
+    expect(add.column.type == reldb::ColumnType::kInt64, "type");
+    expect(!add.column.primary_key, "not pk");
+    expect_eq(add.default_value.GetInt64(), static_cast<std::int64_t>(0), "def");
+    expect_eq(reldb::ToString(s),
+              std::string("AlterTableAddColumn(users, age Int64 DEFAULT 0)"), "print add");
+
+    EXPECT_OK(reldb::ParseStatement(
+                  "ALTER TABLE users ADD COLUMN city TEXT DEFAULT 'NYC'", &s),
+              "add str");
+    expect_eq(std::get<reldb::AlterTableAddColumnStmt>(s).default_value.GetString(),
+              std::string("NYC"), "str def");
+
+    EXPECT_OK(reldb::ParseStatement("ALTER TABLE users DROP COLUMN age", &s), "drop");
+    expect(reldb::IsAlterTableDropColumn(s), "drop kind");
+    expect_eq(std::get<reldb::AlterTableDropColumnStmt>(s).column_name, std::string("age"),
+              "drop col");
+    expect_eq(reldb::ToString(s), std::string("AlterTableDropColumn(users, age)"),
+              "print drop");
+
+    // Reject PRIMARY KEY on ADD
+    expect(reldb::ParseStatement(
+               "ALTER TABLE users ADD COLUMN x INT PRIMARY KEY DEFAULT 1", &s)
+               .IsInvalidArgument(),
+           "pk add");
+    // Missing DEFAULT
+    expect(reldb::ParseStatement("ALTER TABLE users ADD COLUMN x INT", &s)
+               .IsInvalidArgument(),
+           "no default");
+    // Bad action
+    expect(reldb::ParseStatement("ALTER TABLE users RENAME COLUMN a TO b", &s)
+               .IsInvalidArgument(),
+           "rename");
+}
+
 TEST(reldb_sql_parse_insert) {
     reldb::Statement s;
     EXPECT_OK(reldb::ParseStatement(

@@ -65,6 +65,15 @@ std::string ToStringDropTable(const DropTableStmt& s) {
     return out;
 }
 
+std::string ToStringAlterTableAddColumn(const AlterTableAddColumnStmt& s) {
+    return "AlterTableAddColumn(" + s.table_name + ", " + s.column.name + " " +
+           TypeName(s.column.type) + " DEFAULT " + FormatValue(s.default_value) + ")";
+}
+
+std::string ToStringAlterTableDropColumn(const AlterTableDropColumnStmt& s) {
+    return "AlterTableDropColumn(" + s.table_name + ", " + s.column_name + ")";
+}
+
 std::string ToStringInsert(const InsertStmt& s) {
     std::string out = "Insert(" + s.table_name;
     if (!s.column_names.empty()) {
@@ -149,6 +158,10 @@ std::string ToString(const Statement& stmt) {
                 return ToStringCreateTable(node);
             } else if constexpr (std::is_same_v<T, DropTableStmt>) {
                 return ToStringDropTable(node);
+            } else if constexpr (std::is_same_v<T, AlterTableAddColumnStmt>) {
+                return ToStringAlterTableAddColumn(node);
+            } else if constexpr (std::is_same_v<T, AlterTableDropColumnStmt>) {
+                return ToStringAlterTableDropColumn(node);
             } else if constexpr (std::is_same_v<T, InsertStmt>) {
                 return ToStringInsert(node);
             } else if constexpr (std::is_same_v<T, SelectStmt>) {
