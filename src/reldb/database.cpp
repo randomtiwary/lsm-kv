@@ -296,6 +296,115 @@ lsmkv::Status Database::AlterTableAddColumn(const std::string& table, const Colu
     return STATUS(OK);
 }
 
+lsmkv::Status Database::AlterTableDropColumn(const std::string& table,
+                                             const std::string& col_name) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    RELDB_FAIL_IF(open_txn_count_ != 0, InvalidArgument, "DDL requires no open transactions");
+    RELDB_FAIL_IF(ddl_in_progress_, InvalidArgument, "DDL in progress");
+    ddl_in_progress_ = true;
+    ScopedBool clear_ddl(ddl_in_progress_, false);
+
+    RELDB_FAIL_IF(col_name.empty(), InvalidArgument, "column name is empty");
+
+    TableSchema old;
+    RELDB_RETURN_NOT_OK(catalog_->GetTable(table, &old));
+
+    const int drop_idx = old.ColumnIndex(col_name);
+    RELDB_FAIL_IF(drop_idx < 0, InvalidArgument, "unknown column: " + col_name);
+    RELDB_FAIL_IF(old.columns()[static_cast<std::size_t>(drop_idx)].primary_key,
+                  InvalidArgument, "cannot drop PRIMARY KEY column");
+
+    std::vector<ColumnDef> cols;
+    cols.reserve(old.num_columns() - 1);
+    for (std::size_t i = 0; i < old.num_columns(); ++i) {
+        if (static_cast<int>(i) == drop_idx) continue;
+        cols.push_back(old.columns()[i]);
+    }
+    TableSchema neu(old.name(), std::move(cols));
+    RELDB_RETURN_NOT_OK(neu.Validate());
+
+    // Phase 1: collect PKs (destroy iterator before rewrites).
+    std::vector<Value> pks;
+    {
+        const std::string prefix = "d/" + table + "/";
+        auto it = kv_->NewIterator(lsmkv::ReadOptions());
+        it->Seek(prefix);
+        while (it->Valid() && it->key().starts_with(prefix)) {
+            const std::string key = it->key().ToString();
+            const std::string pk_hex = key.substr(prefix.size());
+            Value pk;
+            RELDB_RETURN_NOT_OK(DecodePkFromKey(pk_hex, &pk));
+            pks.push_back(std::move(pk));
+            it->Next();
+        }
+        RELDB_RETURN_NOT_OK(it->status());
+    }
+
+    // Phase 2: rewrite live heads without the dropped cell.
+    const Timestamp commit_ts = next_ts_++;
+    for (const Value& pk : pks) {
+        Timestamp head_id = 0;
+        RELDB_RETURN_NOT_OK(store_->GetLatestVersionId(table, pk, &head_id));
+
+        VersionRecord prior;
+        RELDB_RETURN_NOT_OK(store_->GetVersion(table, pk, head_id, &prior));
+
+        while (prior.is_provisional()) {
+            if (prior.prev_id == 0) {
+                prior.is_tombstone = true;
+                break;
+            }
+            RELDB_RETURN_NOT_OK(store_->GetVersion(table, pk, prior.prev_id, &prior));
+        }
+
+        if (prior.is_tombstone) {
+            continue;
+        }
+        if (prior.end_ts != 0) {
+            continue;
+        }
+        if (prior.start_ts == 0) {
+            return STATUS(Corruption, "ALTER: unexpected provisional head");
+        }
+
+        Row row;
+        RELDB_RETURN_NOT_OK(Row::Decode(prior.payload, &row));
+        if (row.size() == neu.num_columns()) {
+            // Already at new width (retry / partial prior run).
+            continue;
+        }
+        if (row.size() != old.num_columns()) {
+            return STATUS(Corruption, "ALTER: row width does not match schema");
+        }
+
+        std::vector<Value> cells;
+        cells.reserve(neu.num_columns());
+        for (std::size_t i = 0; i < row.size(); ++i) {
+            if (static_cast<int>(i) == drop_idx) continue;
+            cells.push_back(row.at(i));
+        }
+        Row neu_row(std::move(cells));
+        RELDB_RETURN_NOT_OK(neu_row.ValidateAgainst(neu));
+
+        prior.end_ts = commit_ts;
+        RELDB_RETURN_NOT_OK(store_->PutVersionValue(table, pk, prior));
+
+        VersionRecord neu_rec;
+        neu_rec.version_id = next_version_id_++;
+        neu_rec.start_ts = commit_ts;
+        neu_rec.end_ts = 0;
+        neu_rec.prev_id = prior.version_id;
+        neu_rec.created_by = 0;  // DDL system install (not a user txn)
+        neu_rec.is_tombstone = false;
+        neu_rec.payload = neu_row.Encode();
+        RELDB_RETURN_NOT_OK(store_->PutVersion(table, pk, neu_rec));
+    }
+
+    RELDB_RETURN_NOT_OK(PersistOracles());
+    RELDB_RETURN_NOT_OK(catalog_->PutTable(neu));
+    return STATUS(OK);
+}
+
 std::size_t Database::open_txn_count() const {
     std::shared_lock<std::shared_mutex> lock(mu_);
     return open_txn_count_;

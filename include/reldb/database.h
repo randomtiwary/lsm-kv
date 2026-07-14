@@ -52,6 +52,12 @@ public:
     lsmkv::Status AlterTableAddColumn(const std::string& table, const ColumnDef& col,
                                       const Value& default_value);
 
+    // ALTER TABLE DROP COLUMN: remove a non-PK column by name. Same collect-
+    // then-rewrite path as ADD; forbids dropping the primary key. NotFound if
+    // the table is missing; InvalidArgument if the column is unknown or is PK.
+    lsmkv::Status AlterTableDropColumn(const std::string& table,
+                                       const std::string& col_name);
+
     // Catalog lookup. Uses a shared lock on cache hits; upgrades to exclusive
     // only when loading from KV / filling the cache (double-checked).
     lsmkv::Status GetTable(const std::string& name, TableSchema* out) const;
