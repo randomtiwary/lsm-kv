@@ -62,16 +62,57 @@ struct OrderByItem {
     bool ascending = true;
 };
 
+// Aggregate function names (parser/binder fill these; execution in Phase C later).
+enum class AggFunc : std::uint8_t {
+    kCount = 0,
+    kSum = 1,
+    kAvg = 2,
+    kMin = 3,
+    kMax = 4,
+};
+
+// One SELECT list item: a plain expression or an aggregate (COUNT/SUM/…).
+// C0 defines the shape; C1 fills aggregates; C3 sets output_name after bind.
+struct SelectItem {
+    enum class Kind : std::uint8_t { kExpr = 0, kAgg = 1 };
+
+    Kind kind = Kind::kExpr;
+    // kExpr: bound projection expression.
+    std::unique_ptr<Expr> expr;
+    // kAgg fields (unused until C1 parser lands).
+    AggFunc agg_func = AggFunc::kCount;
+    bool agg_star = false;       // COUNT(*)
+    std::string agg_column;      // column ref when !agg_star
+    std::string alias;           // optional AS name (parser may fill later)
+    std::string output_name;     // required after bind (C3)
+};
+
+// FROM clause. C0: single table only. Phase D adds join tails.
+struct FromClause {
+    std::string table_name;
+};
+
 struct SelectStmt {
     bool select_star = false;
-    // Used when select_star is false (column refs or other exprs).
-    std::vector<std::unique_ptr<Expr>> select_list;
-    std::string table_name;
+    // Used when select_star is false.
+    std::vector<SelectItem> select_list;
+    FromClause from;
     std::unique_ptr<Expr> where;  // null if no WHERE
+    // Empty until C1 parses GROUP BY / C4 HAVING.
+    std::vector<std::string> group_by;
+    std::unique_ptr<Expr> having;
     std::vector<OrderByItem> order_by;
     bool has_limit = false;
     std::int64_t limit = 0;
 };
+
+// Helper: wrap a projection expression as a SelectItem.
+inline SelectItem MakeExprSelectItem(std::unique_ptr<Expr> expr) {
+    SelectItem item;
+    item.kind = SelectItem::Kind::kExpr;
+    item.expr = std::move(expr);
+    return item;
+}
 
 struct AssignmentAst {
     std::string column_name;

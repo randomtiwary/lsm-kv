@@ -88,6 +88,36 @@ std::string ToStringInsert(const InsertStmt& s) {
     return out;
 }
 
+const char* AggFuncName(AggFunc f) {
+    switch (f) {
+        case AggFunc::kCount: return "COUNT";
+        case AggFunc::kSum: return "SUM";
+        case AggFunc::kAvg: return "AVG";
+        case AggFunc::kMin: return "MIN";
+        case AggFunc::kMax: return "MAX";
+    }
+    return "AGG";
+}
+
+std::string ToStringSelectItem(const SelectItem& item) {
+    std::string out;
+    if (item.kind == SelectItem::Kind::kAgg) {
+        out = std::string(AggFuncName(item.agg_func)) + "(";
+        if (item.agg_star) {
+            out += "*";
+        } else {
+            out += item.agg_column;
+        }
+        out += ")";
+    } else {
+        out = item.expr ? item.expr->ToString() : "?";
+    }
+    if (!item.alias.empty()) {
+        out += " AS " + item.alias;
+    }
+    return out;
+}
+
 std::string ToStringSelect(const SelectStmt& s) {
     std::string out = "Select(";
     if (s.select_star) {
@@ -95,14 +125,20 @@ std::string ToStringSelect(const SelectStmt& s) {
     } else {
         std::vector<std::string> items;
         items.reserve(s.select_list.size());
-        for (const auto& e : s.select_list) {
-            items.push_back(e ? e->ToString() : "?");
+        for (const auto& item : s.select_list) {
+            items.push_back(ToStringSelectItem(item));
         }
         out += "[" + JoinComma(items) + "]";
     }
-    out += " FROM " + s.table_name;
+    out += " FROM " + s.from.table_name;
     if (s.where) {
         out += " WHERE " + s.where->ToString();
+    }
+    if (!s.group_by.empty()) {
+        out += " GROUP BY [" + JoinComma(s.group_by) + "]";
+    }
+    if (s.having) {
+        out += " HAVING " + s.having->ToString();
     }
     if (!s.order_by.empty()) {
         std::vector<std::string> ord;

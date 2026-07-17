@@ -347,7 +347,11 @@ lsmkv::Status SqlSession::PlanAccess(Transaction& txn, const TableSchema& schema
 
 lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
     TableSchema schema;
-    RELDB_RETURN_NOT_OK(LookupTable(stmt.table_name, &schema));
+    RELDB_RETURN_NOT_OK(LookupTable(stmt.from.table_name, &schema));
+
+    // Aggregates / GROUP BY / HAVING land in C1–C4; reject if present early.
+    RELDB_FAIL_IF(!stmt.group_by.empty(), InvalidArgument, "GROUP BY is not supported");
+    RELDB_FAIL_IF(stmt.having != nullptr, InvalidArgument, "HAVING is not supported");
 
     AutoTxnGuard auto_txn(*this);
     RELDB_RETURN_NOT_OK(auto_txn.Ensure());
@@ -365,9 +369,13 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         std::vector<Projection> projs;
         projs.reserve(stmt.select_list.size());
         out_names.reserve(stmt.select_list.size());
-        for (auto& e : stmt.select_list) {
-            RELDB_RETURN_IF(e == nullptr,
+        for (auto& item : stmt.select_list) {
+            RELDB_RETURN_IF(item.kind != SelectItem::Kind::kExpr,
+                            auto_txn.Complete(STATUS(InvalidArgument,
+                                                     "aggregates are not supported")));
+            RELDB_RETURN_IF(item.expr == nullptr,
                             auto_txn.Complete(STATUS(InvalidArgument, "null select expression")));
+            auto& e = item.expr;
             std::string name =
                 (e->kind() == Expr::Kind::kColumn) ? e->column_name() : e->ToString();
             RELDB_RETURN_NOT_OK(e->Bind(schema));
