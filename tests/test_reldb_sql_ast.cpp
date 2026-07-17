@@ -104,8 +104,8 @@ TEST(reldb_sql_ast_select_print) {
               "full");
 }
 
-// C0: SelectStmt carries FromClause / SelectItem / empty group_by+having.
-TEST(reldb_sql_ast_select_c0_shape) {
+// SelectStmt shape: FromClause, SelectItem, group_by / having fields.
+TEST(reldb_sql_ast_select_stmt_shape) {
     reldb::SelectStmt sel;
     sel.from.table_name = "t";
     sel.select_list.push_back(reldb::MakeExprSelectItem(reldb::Expr::Column("id")));
@@ -115,7 +115,7 @@ TEST(reldb_sql_ast_select_c0_shape) {
     expect_eq(static_cast<int>(sel.select_list.size()), 1, "one item");
     expect(sel.select_list[0].kind == reldb::SelectItem::Kind::kExpr, "expr kind");
 
-    // Aggregate SelectItem ToString (for C1); not produced by the parser yet.
+    // Aggregate SelectItem ToString (parser does not produce this yet).
     reldb::SelectItem agg;
     agg.kind = reldb::SelectItem::Kind::kAgg;
     agg.agg_func = reldb::AggFunc::kCount;

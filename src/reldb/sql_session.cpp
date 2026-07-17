@@ -349,7 +349,7 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
     TableSchema schema;
     RELDB_RETURN_NOT_OK(LookupTable(stmt.from.table_name, &schema));
 
-    // Aggregates / GROUP BY / HAVING land in C1–C4; reject if present early.
+    // Not supported yet (fields exist on SelectStmt for forward compatibility).
     RELDB_FAIL_IF(!stmt.group_by.empty(), InvalidArgument, "GROUP BY is not supported");
     RELDB_FAIL_IF(stmt.having != nullptr, InvalidArgument, "HAVING is not supported");
 

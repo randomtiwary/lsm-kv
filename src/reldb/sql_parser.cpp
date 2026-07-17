@@ -717,7 +717,7 @@ private:
                 }
                 std::unique_ptr<Expr> e;
                 RELDB_RETURN_NOT_OK(ParseExpr(&e));
-                // Optional AS alias is not supported yet (C1/C3).
+                // Optional AS alias is not supported.
                 if (lex_.Check(TokenKind::kAs)) {
                     return lex_.Error("AS aliases are not supported");
                 }
@@ -734,7 +734,7 @@ private:
             return lex_.Error("subqueries are not supported");
         }
         RELDB_RETURN_NOT_OK(ParseIdent(&stmt.from.table_name));
-        // Reject JOIN after table (Phase D).
+        // Reject JOIN after table.
         if (lex_.Check(TokenKind::kJoin) || lex_.Check(TokenKind::kComma)) {
             return lex_.Error("joins are not supported");
         }
@@ -742,7 +742,6 @@ private:
         if (lex_.Match(TokenKind::kWhere)) {
             RELDB_RETURN_NOT_OK(ParseExpr(&stmt.where));
         }
-        // group_by / having fields exist on SelectStmt (C0); parse lands in C1/C4.
         if (lex_.Match(TokenKind::kGroup)) {
             return lex_.Error("GROUP BY is not supported");
         }
