@@ -72,6 +72,12 @@ enum class TokenKind : std::uint8_t {
     kExcept,
     kDistinct,
     kAs,
+    // Aggregate functions
+    kCount,
+    kSum,
+    kAvg,
+    kMin,
+    kMax,
     // Punctuation / operators
     kLParen,
     kRParen,
@@ -149,6 +155,11 @@ const char* TokenKindName(TokenKind k) {
         case TokenKind::kExcept: return "EXCEPT";
         case TokenKind::kDistinct: return "DISTINCT";
         case TokenKind::kAs: return "AS";
+        case TokenKind::kCount: return "COUNT";
+        case TokenKind::kSum: return "SUM";
+        case TokenKind::kAvg: return "AVG";
+        case TokenKind::kMin: return "MIN";
+        case TokenKind::kMax: return "MAX";
         case TokenKind::kLParen: return "(";
         case TokenKind::kRParen: return ")";
         case TokenKind::kComma: return ",";
@@ -427,6 +438,11 @@ private:
         if (lower == "except") return TokenKind::kExcept;
         if (lower == "distinct") return TokenKind::kDistinct;
         if (lower == "as") return TokenKind::kAs;
+        if (lower == "count") return TokenKind::kCount;
+        if (lower == "sum") return TokenKind::kSum;
+        if (lower == "avg") return TokenKind::kAvg;
+        if (lower == "min") return TokenKind::kMin;
+        if (lower == "max") return TokenKind::kMax;
         return TokenKind::kIdent;
     }
 
@@ -702,6 +718,62 @@ private:
         return STATUS(OK);
     }
 
+    static bool IsAggFunc(TokenKind k) {
+        return k == TokenKind::kCount || k == TokenKind::kSum || k == TokenKind::kAvg ||
+               k == TokenKind::kMin || k == TokenKind::kMax;
+    }
+
+    static AggFunc TokenToAggFunc(TokenKind k) {
+        switch (k) {
+            case TokenKind::kCount: return AggFunc::kCount;
+            case TokenKind::kSum: return AggFunc::kSum;
+            case TokenKind::kAvg: return AggFunc::kAvg;
+            case TokenKind::kMin: return AggFunc::kMin;
+            case TokenKind::kMax: return AggFunc::kMax;
+            default: return AggFunc::kCount;
+        }
+    }
+
+    // select_item := agg_func '(' ( '*' | column_ref ) ')' [ AS name ]
+    //              | expr [ AS name ]
+    lsmkv::Status ParseSelectItem(SelectItem* out) {
+        if (IsAggFunc(lex_.current().kind)) {
+            const TokenKind func_tok = lex_.current().kind;
+            lex_.Advance();
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kLParen, "'('"));
+
+            SelectItem item;
+            item.kind = SelectItem::Kind::kAgg;
+            item.agg_func = TokenToAggFunc(func_tok);
+
+            if (lex_.Match(TokenKind::kStar)) {
+                if (func_tok != TokenKind::kCount) {
+                    return lex_.Error("only COUNT(*) is allowed; use a column for other aggregates");
+                }
+                item.agg_star = true;
+            } else {
+                // Single column ref only (no SUM(a+b)).
+                RELDB_RETURN_NOT_OK(ParseIdent(&item.agg_column));
+                item.agg_star = false;
+            }
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kRParen, "')'"));
+            if (lex_.Match(TokenKind::kAs)) {
+                RELDB_RETURN_NOT_OK(ParseIdent(&item.alias));
+            }
+            *out = std::move(item);
+            return STATUS(OK);
+        }
+
+        std::unique_ptr<Expr> e;
+        RELDB_RETURN_NOT_OK(ParseExpr(&e));
+        SelectItem item = MakeExprSelectItem(std::move(e));
+        if (lex_.Match(TokenKind::kAs)) {
+            RELDB_RETURN_NOT_OK(ParseIdent(&item.alias));
+        }
+        *out = std::move(item);
+        return STATUS(OK);
+    }
+
     lsmkv::Status ParseSelect(Statement* out) {
         lex_.Advance();  // SELECT
         if (lex_.Check(TokenKind::kDistinct)) {
@@ -715,13 +787,9 @@ private:
                 if (lex_.Check(TokenKind::kStar)) {
                     return lex_.Error("cannot mix * with other select items");
                 }
-                std::unique_ptr<Expr> e;
-                RELDB_RETURN_NOT_OK(ParseExpr(&e));
-                // Optional AS alias is not supported.
-                if (lex_.Check(TokenKind::kAs)) {
-                    return lex_.Error("AS aliases are not supported");
-                }
-                stmt.select_list.push_back(MakeExprSelectItem(std::move(e)));
+                SelectItem item;
+                RELDB_RETURN_NOT_OK(ParseSelectItem(&item));
+                stmt.select_list.push_back(std::move(item));
                 if (lex_.Match(TokenKind::kComma)) continue;
                 break;
             }
@@ -743,8 +811,19 @@ private:
             RELDB_RETURN_NOT_OK(ParseExpr(&stmt.where));
         }
         if (lex_.Match(TokenKind::kGroup)) {
-            return lex_.Error("GROUP BY is not supported");
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kBy, "BY"));
+            for (;;) {
+                std::string col;
+                RELDB_RETURN_NOT_OK(ParseIdent(&col));
+                stmt.group_by.push_back(std::move(col));
+                if (lex_.Match(TokenKind::kComma)) continue;
+                break;
+            }
+            if (stmt.group_by.empty()) {
+                return lex_.Error("empty GROUP BY list");
+            }
         }
+        // HAVING is not supported yet (fields exist; parse later).
         if (lex_.Match(TokenKind::kHaving)) {
             return lex_.Error("HAVING is not supported");
         }

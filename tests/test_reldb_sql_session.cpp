@@ -244,6 +244,28 @@ TEST(reldb_sql_session_drop_table) {
     RemoveDirRecursive(dir);
 }
 
+// Aggregates and GROUP BY parse, but execution is not wired yet.
+TEST(reldb_sql_session_aggregates_not_executed) {
+    auto dir = MakeTempDir("reldb_sql_sess_agg");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        reldb::SqlSession session(db);
+        reldb::QueryResult r;
+
+        EXPECT_OK(session.Execute(
+                      "CREATE TABLE t(id INT PRIMARY KEY, score INT);", r),
+                  "create");
+        EXPECT_OK(session.Execute("INSERT INTO t VALUES (1, 10);", r), "ins");
+
+        expect(session.Execute("SELECT COUNT(*) FROM t;", r).IsInvalidArgument(),
+               "count not exec");
+        expect(session.Execute("SELECT score FROM t GROUP BY score;", r).IsInvalidArgument(),
+               "group not exec");
+    }
+    RemoveDirRecursive(dir);
+}
+
 TEST(reldb_sql_session_pk_point_plan_tag) {
     auto dir = MakeTempDir("reldb_sql_sess_plan");
     {
