@@ -36,6 +36,19 @@ struct DropTableStmt {
     bool if_exists = false;
 };
 
+// ALTER TABLE name ADD COLUMN col type DEFAULT literal (no PRIMARY KEY).
+struct AlterTableAddColumnStmt {
+    std::string table_name;
+    ColumnDefAst column;  // primary_key always false from the parser
+    Value default_value;
+};
+
+// ALTER TABLE name DROP COLUMN col (cannot drop PK — enforced at Database).
+struct AlterTableDropColumnStmt {
+    std::string table_name;
+    std::string column_name;
+};
+
 // Single-row INSERT.
 struct InsertStmt {
     std::string table_name;
@@ -76,8 +89,10 @@ struct DeleteStmt {
     std::unique_ptr<Expr> where;  // null if no WHERE (full table)
 };
 
-using Statement = std::variant<BeginStmt, CommitStmt, AbortStmt, CreateTableStmt, DropTableStmt,
-                               InsertStmt, SelectStmt, UpdateStmt, DeleteStmt>;
+using Statement =
+    std::variant<BeginStmt, CommitStmt, AbortStmt, CreateTableStmt, DropTableStmt,
+                 AlterTableAddColumnStmt, AlterTableDropColumnStmt, InsertStmt, SelectStmt,
+                 UpdateStmt, DeleteStmt>;
 
 // Type predicates for Statement.
 inline bool IsBegin(const Statement& s) { return std::holds_alternative<BeginStmt>(s); }
@@ -88,6 +103,12 @@ inline bool IsCreateTable(const Statement& s) {
 }
 inline bool IsDropTable(const Statement& s) {
     return std::holds_alternative<DropTableStmt>(s);
+}
+inline bool IsAlterTableAddColumn(const Statement& s) {
+    return std::holds_alternative<AlterTableAddColumnStmt>(s);
+}
+inline bool IsAlterTableDropColumn(const Statement& s) {
+    return std::holds_alternative<AlterTableDropColumnStmt>(s);
 }
 inline bool IsInsert(const Statement& s) { return std::holds_alternative<InsertStmt>(s); }
 inline bool IsSelect(const Statement& s) { return std::holds_alternative<SelectStmt>(s); }

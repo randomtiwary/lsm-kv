@@ -148,6 +148,56 @@ TEST(reldb_sql_session_txn_errors_and_ddl_gate) {
     RemoveDirRecursive(dir);
 }
 
+TEST(reldb_sql_session_alter_table) {
+    auto dir = MakeTempDir("reldb_sql_sess_alter");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        reldb::SqlSession session(db);
+        reldb::QueryResult r;
+
+        EXPECT_OK(session.Execute(
+                      "CREATE TABLE users(id INT PRIMARY KEY, name TEXT);", r),
+                  "create");
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (1, 'a');", r), "ins");
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (2, 'b');", r), "ins2");
+
+        EXPECT_OK(session.Execute(
+                      "ALTER TABLE users ADD COLUMN age INT DEFAULT 42;", r),
+                  "add age");
+        EXPECT_OK(session.Execute("SELECT * FROM users WHERE id = 1;", r), "sel");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "1 row");
+        expect_eq(static_cast<int>(r.rows[0].size()), 3, "3 cells");
+        expect_eq(r.rows[0].at(2).GetInt64(), static_cast<std::int64_t>(42), "default");
+
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (3, 'c', 7);", r), "ins3");
+        EXPECT_OK(session.Execute(
+                      "ALTER TABLE users DROP COLUMN age;", r),
+                  "drop age");
+        EXPECT_OK(session.Execute("SELECT * FROM users WHERE id = 1;", r), "sel2");
+        expect_eq(static_cast<int>(r.rows[0].size()), 2, "2 cells");
+        expect_eq(r.rows[0].at(1).GetString(), std::string("a"), "name kept");
+
+        // Cannot drop PK
+        expect(session.Execute("ALTER TABLE users DROP COLUMN id;", r).IsInvalidArgument(),
+               "drop pk");
+
+        // DDL blocked in txn
+        EXPECT_OK(session.Execute("BEGIN;", r), "begin");
+        expect(session.Execute(
+                          "ALTER TABLE users ADD COLUMN z INT DEFAULT 0;", r)
+                   .IsInvalidArgument(),
+               "add in txn");
+        expect(session.Execute("ALTER TABLE users DROP COLUMN name;", r).IsInvalidArgument(),
+               "drop in txn");
+        EXPECT_OK(session.Execute("ABORT;", r), "abort");
+
+        // name still present after blocked drop
+        EXPECT_OK(session.Execute("SELECT name FROM users WHERE id = 1;", r), "name ok");
+    }
+    RemoveDirRecursive(dir);
+}
+
 TEST(reldb_sql_session_drop_table) {
     auto dir = MakeTempDir("reldb_sql_sess_drop");
     {

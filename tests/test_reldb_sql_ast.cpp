@@ -46,6 +46,25 @@ TEST(reldb_sql_ast_drop_table_print) {
     expect_eq(reldb::ToString(s2), std::string("DropTable(IF EXISTS, users)"), "if exists");
 }
 
+TEST(reldb_sql_ast_alter_table_print) {
+    reldb::AlterTableAddColumnStmt add;
+    add.table_name = "users";
+    add.column = {"age", reldb::ColumnType::kInt64, false};
+    add.default_value = reldb::Value::Int64(0);
+    reldb::Statement s = std::move(add);
+    expect(reldb::IsAlterTableAddColumn(s), "add kind");
+    expect_eq(reldb::ToString(s),
+              std::string("AlterTableAddColumn(users, age Int64 DEFAULT 0)"), "add print");
+
+    reldb::AlterTableDropColumnStmt drop;
+    drop.table_name = "users";
+    drop.column_name = "age";
+    reldb::Statement s2 = std::move(drop);
+    expect(reldb::IsAlterTableDropColumn(s2), "drop kind");
+    expect_eq(reldb::ToString(s2), std::string("AlterTableDropColumn(users, age)"),
+              "drop print");
+}
+
 TEST(reldb_sql_ast_insert_print) {
     reldb::InsertStmt ins;
     ins.table_name = "users";
