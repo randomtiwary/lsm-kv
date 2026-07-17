@@ -188,7 +188,9 @@ TEST(reldb_sql_parse_select) {
     {
         const auto& sel = std::get<reldb::SelectStmt>(s);
         expect(sel.select_star, "star");
-        expect_eq(sel.table_name, std::string("users"), "table");
+        expect_eq(sel.from.table_name, std::string("users"), "table");
+        expect(sel.group_by.empty(), "no group by");
+        expect(sel.having == nullptr, "no having");
         expect(sel.where == nullptr, "no where");
         expect(!sel.has_limit, "no limit");
     }

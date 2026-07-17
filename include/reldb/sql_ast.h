@@ -62,16 +62,57 @@ struct OrderByItem {
     bool ascending = true;
 };
 
+// Aggregate function names used by SelectItem (parser/binder/execution).
+enum class AggFunc : std::uint8_t {
+    kCount = 0,
+    kSum = 1,
+    kAvg = 2,
+    kMin = 3,
+    kMax = 4,
+};
+
+// One SELECT list item: a plain expression or an aggregate (COUNT/SUM/…).
+// Aggregates and output_name are filled when the parser/binder support them.
+struct SelectItem {
+    enum class Kind : std::uint8_t { kExpr = 0, kAgg = 1 };
+
+    Kind kind = Kind::kExpr;
+    // kExpr: projection expression.
+    std::unique_ptr<Expr> expr;
+    // kAgg: function, COUNT(*) vs column argument.
+    AggFunc agg_func = AggFunc::kCount;
+    bool agg_star = false;       // COUNT(*)
+    std::string agg_column;      // column ref when !agg_star
+    std::string alias;           // optional AS name
+    std::string output_name;     // result column name after binding
+};
+
+// FROM clause. Currently a single table; joins can extend this later.
+struct FromClause {
+    std::string table_name;
+};
+
 struct SelectStmt {
     bool select_star = false;
-    // Used when select_star is false (column refs or other exprs).
-    std::vector<std::unique_ptr<Expr>> select_list;
-    std::string table_name;
+    // Used when select_star is false.
+    std::vector<SelectItem> select_list;
+    FromClause from;
     std::unique_ptr<Expr> where;  // null if no WHERE
+    // Empty when the query has no GROUP BY / HAVING.
+    std::vector<std::string> group_by;
+    std::unique_ptr<Expr> having;
     std::vector<OrderByItem> order_by;
     bool has_limit = false;
     std::int64_t limit = 0;
 };
+
+// Helper: wrap a projection expression as a SelectItem.
+inline SelectItem MakeExprSelectItem(std::unique_ptr<Expr> expr) {
+    SelectItem item;
+    item.kind = SelectItem::Kind::kExpr;
+    item.expr = std::move(expr);
+    return item;
+}
 
 struct AssignmentAst {
     std::string column_name;

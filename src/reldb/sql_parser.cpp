@@ -721,7 +721,7 @@ private:
                 if (lex_.Check(TokenKind::kAs)) {
                     return lex_.Error("AS aliases are not supported");
                 }
-                stmt.select_list.push_back(std::move(e));
+                stmt.select_list.push_back(MakeExprSelectItem(std::move(e)));
                 if (lex_.Match(TokenKind::kComma)) continue;
                 break;
             }
@@ -733,7 +733,7 @@ private:
         if (lex_.Check(TokenKind::kLParen)) {
             return lex_.Error("subqueries are not supported");
         }
-        RELDB_RETURN_NOT_OK(ParseIdent(&stmt.table_name));
+        RELDB_RETURN_NOT_OK(ParseIdent(&stmt.from.table_name));
         // Reject JOIN after table.
         if (lex_.Check(TokenKind::kJoin) || lex_.Check(TokenKind::kComma)) {
             return lex_.Error("joins are not supported");

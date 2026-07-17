@@ -85,13 +85,13 @@ TEST(reldb_sql_ast_insert_print) {
 TEST(reldb_sql_ast_select_print) {
     reldb::SelectStmt sel;
     sel.select_star = true;
-    sel.table_name = "users";
+    sel.from.table_name = "users";
     reldb::Statement s = std::move(sel);
     expect_eq(reldb::ToString(s), std::string("Select(* FROM users)"), "star");
 
     reldb::SelectStmt sel2;
-    sel2.table_name = "users";
-    sel2.select_list.push_back(reldb::Expr::Column("name"));
+    sel2.from.table_name = "users";
+    sel2.select_list.push_back(reldb::MakeExprSelectItem(reldb::Expr::Column("name")));
     sel2.where = reldb::Expr::Compare(reldb::CmpOp::kEq, reldb::Expr::Column("id"),
                                       reldb::Expr::Literal(reldb::Value::Int64(1)));
     sel2.order_by.push_back({"name", false});
@@ -102,6 +102,30 @@ TEST(reldb_sql_ast_select_print) {
               std::string("Select([Column(name)] FROM users WHERE "
                           "Compare(Eq, Column(id), Literal(1)) ORDER BY [name DESC] LIMIT 10)"),
               "full");
+}
+
+// SelectStmt shape: FromClause, SelectItem, group_by / having fields.
+TEST(reldb_sql_ast_select_stmt_shape) {
+    reldb::SelectStmt sel;
+    sel.from.table_name = "t";
+    sel.select_list.push_back(reldb::MakeExprSelectItem(reldb::Expr::Column("id")));
+    expect(sel.group_by.empty(), "group_by empty");
+    expect(sel.having == nullptr, "having null");
+    expect_eq(sel.from.table_name, std::string("t"), "from table");
+    expect_eq(static_cast<int>(sel.select_list.size()), 1, "one item");
+    expect(sel.select_list[0].kind == reldb::SelectItem::Kind::kExpr, "expr kind");
+
+    // Aggregate SelectItem ToString (parser does not produce this yet).
+    reldb::SelectItem agg;
+    agg.kind = reldb::SelectItem::Kind::kAgg;
+    agg.agg_func = reldb::AggFunc::kCount;
+    agg.agg_star = true;
+    sel.select_list.clear();
+    sel.select_list.push_back(std::move(agg));
+    sel.group_by = {"dept"};
+    reldb::Statement s = std::move(sel);
+    expect_eq(reldb::ToString(s),
+              std::string("Select([COUNT(*)] FROM t GROUP BY [dept])"), "agg print");
 }
 
 TEST(reldb_sql_ast_update_delete_print) {
