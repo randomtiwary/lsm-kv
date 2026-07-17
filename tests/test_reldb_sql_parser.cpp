@@ -303,8 +303,6 @@ TEST(reldb_sql_parse_reject_unsupported) {
                .IsInvalidArgument(),
            "join");
     expect(reldb::ParseStatement("SELECT * FROM a, b", &s).IsInvalidArgument(), "comma join");
-    expect(reldb::ParseStatement("SELECT * FROM t GROUP BY id", &s).IsInvalidArgument(),
-           "group");
     expect(reldb::ParseStatement("SELECT DISTINCT name FROM t", &s).IsInvalidArgument(),
            "distinct");
     expect(reldb::ParseStatement("SELECT * FROM t UNION SELECT * FROM u", &s)
@@ -312,7 +310,9 @@ TEST(reldb_sql_parse_reject_unsupported) {
            "union");
     expect(reldb::ParseStatement("SELECT * FROM (SELECT * FROM t)", &s).IsInvalidArgument(),
            "subquery");
-    expect(reldb::ParseStatement("SELECT name AS n FROM t", &s).IsInvalidArgument(), "as");
+    expect(reldb::ParseStatement("SELECT COUNT(*) FROM t HAVING COUNT(*) > 1", &s)
+               .IsInvalidArgument(),
+           "having");
 
     // Trailing junk
     expect(reldb::ParseStatement("BEGIN COMMIT", &s).IsInvalidArgument(), "junk");
@@ -322,4 +322,78 @@ TEST(reldb_sql_parse_reject_unsupported) {
     expect(reldb::ParseStatement("INSERT INTO t VALUES ('unterminated)", &s)
                .IsInvalidArgument(),
            "bad string");
+}
+
+TEST(reldb_sql_parse_aggregates_and_group_by) {
+    reldb::Statement s;
+
+    EXPECT_OK(reldb::ParseStatement("SELECT COUNT(*) FROM users", &s), "count star");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect_eq(static_cast<int>(sel.select_list.size()), 1, "1 item");
+        expect(sel.select_list[0].kind == reldb::SelectItem::Kind::kAgg, "agg");
+        expect(sel.select_list[0].agg_func == reldb::AggFunc::kCount, "count");
+        expect(sel.select_list[0].agg_star, "star");
+        expect(sel.group_by.empty(), "no group");
+        expect_eq(reldb::ToString(s), std::string("Select([COUNT(*)] FROM users)"), "print");
+    }
+
+    EXPECT_OK(reldb::ParseStatement("SELECT SUM(score) AS total FROM users", &s), "sum as");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect(sel.select_list[0].kind == reldb::SelectItem::Kind::kAgg, "agg");
+        expect(sel.select_list[0].agg_func == reldb::AggFunc::kSum, "sum");
+        expect(!sel.select_list[0].agg_star, "not star");
+        expect_eq(sel.select_list[0].agg_column, std::string("score"), "col");
+        expect_eq(sel.select_list[0].alias, std::string("total"), "alias");
+        expect_eq(reldb::ToString(s),
+                  std::string("Select([SUM(score) AS total] FROM users)"), "print sum");
+    }
+
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT dept, COUNT(*) FROM emp GROUP BY dept", &s),
+              "group by");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect_eq(static_cast<int>(sel.select_list.size()), 2, "2 items");
+        expect(sel.select_list[0].kind == reldb::SelectItem::Kind::kExpr, "expr");
+        expect(sel.select_list[1].kind == reldb::SelectItem::Kind::kAgg, "agg");
+        expect_eq(static_cast<int>(sel.group_by.size()), 1, "1 group col");
+        expect_eq(sel.group_by[0], std::string("dept"), "dept");
+        expect_eq(reldb::ToString(s),
+                  std::string("Select([Column(dept), COUNT(*)] FROM emp GROUP BY [dept])"),
+                  "print group");
+    }
+
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT AVG(score), MIN(score), MAX(score) FROM users GROUP BY name, id",
+                  &s),
+              "multi agg");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect_eq(static_cast<int>(sel.select_list.size()), 3, "3 aggs");
+        expect(sel.select_list[0].agg_func == reldb::AggFunc::kAvg, "avg");
+        expect(sel.select_list[1].agg_func == reldb::AggFunc::kMin, "min");
+        expect(sel.select_list[2].agg_func == reldb::AggFunc::kMax, "max");
+        expect_eq(static_cast<int>(sel.group_by.size()), 2, "2 group cols");
+    }
+
+    // AS on plain expression
+    EXPECT_OK(reldb::ParseStatement("SELECT name AS n FROM users", &s), "expr as");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect(sel.select_list[0].kind == reldb::SelectItem::Kind::kExpr, "expr");
+        expect_eq(sel.select_list[0].alias, std::string("n"), "alias");
+        expect_eq(reldb::ToString(s),
+                  std::string("Select([Column(name) AS n] FROM users)"), "print as");
+    }
+
+    // Reject non-COUNT *
+    expect(reldb::ParseStatement("SELECT SUM(*) FROM t", &s).IsInvalidArgument(), "sum star");
+    // Reject empty GROUP BY
+    expect(reldb::ParseStatement("SELECT COUNT(*) FROM t GROUP BY", &s).IsInvalidArgument(),
+           "empty group");
+    // SUM(a+b) not supported (only column ref)
+    expect(reldb::ParseStatement("SELECT SUM(score + 1) FROM t", &s).IsInvalidArgument(),
+           "sum expr");
 }
