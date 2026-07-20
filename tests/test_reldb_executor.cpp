@@ -1,3 +1,5 @@
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -317,6 +319,178 @@ TEST(reldb_exec_update_rejects_pk_change) {
         reldb::UpdateOp upd(*txn, schema, std::move(src), std::move(assigns));
         reldb::QueryResult r;
         expect(upd.Execute(r).IsInvalidArgument(), "pk change rejected");
+        EXPECT_OK(txn->Abort(), "abort");
+    }
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_exec_hash_agg_scalar) {
+    auto dir = MakeTempDir("reldb_exec_agg_scalar");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        SeedUsers(*db);
+        const auto schema = UsersSchema();
+
+        std::unique_ptr<reldb::Transaction> txn;
+        EXPECT_OK(db->Begin(&txn), "begin");
+        reldb::QueryResult r;
+        {
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, schema);
+            // score is column index 2
+            std::vector<reldb::AggSpec> aggs = {
+                {reldb::AggFunc::kCount, true, -1, "cnt"},
+                {reldb::AggFunc::kSum, false, 2, "sum_score"},
+                {reldb::AggFunc::kAvg, false, 2, "avg_score"},
+                {reldb::AggFunc::kMin, false, 2, "min_score"},
+                {reldb::AggFunc::kMax, false, 2, "max_score"},
+            };
+            auto agg = std::make_unique<reldb::HashAggregateExecutor>(
+                std::move(scan), /*group_by=*/std::vector<int>{}, std::move(aggs));
+            EXPECT_OK(reldb::Collect(*agg, r), "collect");
+        }
+        expect_eq(r.plan_tag, std::string("HashAggregate<-SeqScan"), "tag");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "one row");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(3), "count");
+        // scores 10+30+20 = 60; avg 20
+        expect_eq(r.rows[0].at(1).GetInt64(), static_cast<std::int64_t>(60), "sum");
+        expect_eq(r.rows[0].at(2).GetInt64(), static_cast<std::int64_t>(20), "avg");
+        expect_eq(r.rows[0].at(3).GetInt64(), static_cast<std::int64_t>(10), "min");
+        expect_eq(r.rows[0].at(4).GetInt64(), static_cast<std::int64_t>(30), "max");
+        EXPECT_OK(txn->Abort(), "abort");
+    }
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_exec_hash_agg_empty_scalar) {
+    auto dir = MakeTempDir("reldb_exec_agg_empty");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        EXPECT_OK(db->CreateTable(UsersSchema()), "create");
+
+        std::unique_ptr<reldb::Transaction> txn;
+        EXPECT_OK(db->Begin(&txn), "begin");
+        reldb::QueryResult r;
+        {
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, UsersSchema());
+            std::vector<reldb::AggSpec> aggs = {
+                {reldb::AggFunc::kCount, true, -1, "cnt"},
+                {reldb::AggFunc::kSum, false, 2, "s"},
+                {reldb::AggFunc::kMin, false, 2, "m"},
+            };
+            auto agg = std::make_unique<reldb::HashAggregateExecutor>(
+                std::move(scan), std::vector<int>{}, std::move(aggs));
+            EXPECT_OK(reldb::Collect(*agg, r), "collect");
+        }
+        expect_eq(static_cast<int>(r.rows.size()), 1, "one row");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(0), "count0");
+        expect(r.rows[0].at(1).IsNull(), "sum null");
+        expect(r.rows[0].at(2).IsNull(), "min null");
+        EXPECT_OK(txn->Abort(), "abort");
+    }
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_exec_hash_agg_group_by) {
+    auto dir = MakeTempDir("reldb_exec_agg_gb");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        // Two rows share name "ada".
+        EXPECT_OK(db->CreateTable(UsersSchema()), "create");
+        {
+            std::unique_ptr<reldb::Transaction> seed;
+            EXPECT_OK(db->Begin(&seed), "seed");
+            reldb::InsertOp ins(*seed, "users",
+                                {User(1, "ada", 10), User(2, "ada", 30), User(3, "bob", 20)});
+            reldb::QueryResult r;
+            EXPECT_OK(ins.Execute(r), "ins");
+            EXPECT_OK(seed->Commit(), "c");
+        }
+
+        std::unique_ptr<reldb::Transaction> txn;
+        EXPECT_OK(db->Begin(&txn), "begin");
+        reldb::QueryResult r;
+        {
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, UsersSchema());
+            // GROUP BY name (col 1), COUNT(*), SUM(score)
+            std::vector<reldb::AggSpec> aggs = {
+                {reldb::AggFunc::kCount, true, -1, "cnt"},
+                {reldb::AggFunc::kSum, false, 2, "sum_score"},
+            };
+            auto agg = std::make_unique<reldb::HashAggregateExecutor>(
+                std::move(scan), std::vector<int>{1}, std::move(aggs));
+            EXPECT_OK(reldb::Collect(*agg, r), "collect");
+        }
+        expect_eq(r.plan_tag, std::string("HashAggregate<-SeqScan"), "tag");
+        expect_eq(static_cast<int>(r.rows.size()), 2, "2 groups");
+        // First-seen order: ada then bob
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "ada");
+        expect_eq(r.rows[0].at(1).GetInt64(), static_cast<std::int64_t>(2), "ada cnt");
+        expect_eq(r.rows[0].at(2).GetInt64(), static_cast<std::int64_t>(40), "ada sum");
+        expect_eq(r.rows[1].at(0).GetString(), std::string("bob"), "bob");
+        expect_eq(r.rows[1].at(1).GetInt64(), static_cast<std::int64_t>(1), "bob cnt");
+        expect_eq(r.rows[1].at(2).GetInt64(), static_cast<std::int64_t>(20), "bob sum");
+        EXPECT_OK(txn->Abort(), "abort");
+    }
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_exec_hash_agg_empty_group_by) {
+    auto dir = MakeTempDir("reldb_exec_agg_gb_empty");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        EXPECT_OK(db->CreateTable(UsersSchema()), "create");
+
+        std::unique_ptr<reldb::Transaction> txn;
+        EXPECT_OK(db->Begin(&txn), "begin");
+        reldb::QueryResult r;
+        {
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, UsersSchema());
+            std::vector<reldb::AggSpec> aggs = {
+                {reldb::AggFunc::kCount, true, -1, "cnt"},
+            };
+            auto agg = std::make_unique<reldb::HashAggregateExecutor>(
+                std::move(scan), std::vector<int>{1}, std::move(aggs));
+            EXPECT_OK(reldb::Collect(*agg, r), "collect");
+        }
+        expect_eq(static_cast<int>(r.rows.size()), 0, "zero groups");
+        EXPECT_OK(txn->Abort(), "abort");
+    }
+    RemoveDirRecursive(dir);
+}
+
+TEST(reldb_exec_hash_agg_sum_overflow) {
+    auto dir = MakeTempDir("reldb_exec_agg_ovf");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        EXPECT_OK(db->CreateTable(UsersSchema()), "create");
+        {
+            std::unique_ptr<reldb::Transaction> seed;
+            EXPECT_OK(db->Begin(&seed), "seed");
+            reldb::InsertOp ins(
+                *seed, "users",
+                {User(1, "a", std::numeric_limits<std::int64_t>::max()), User(2, "b", 1)});
+            reldb::QueryResult r;
+            EXPECT_OK(ins.Execute(r), "ins");
+            EXPECT_OK(seed->Commit(), "c");
+        }
+
+        std::unique_ptr<reldb::Transaction> txn;
+        EXPECT_OK(db->Begin(&txn), "begin");
+        reldb::QueryResult r;
+        {
+            auto scan = std::make_unique<reldb::SeqScanExecutor>(*txn, UsersSchema());
+            std::vector<reldb::AggSpec> aggs = {
+                {reldb::AggFunc::kSum, false, 2, "s"},
+            };
+            auto agg = std::make_unique<reldb::HashAggregateExecutor>(
+                std::move(scan), std::vector<int>{}, std::move(aggs));
+            expect(reldb::Collect(*agg, r).IsInvalidArgument(), "overflow");
+        }
         EXPECT_OK(txn->Abort(), "abort");
     }
     RemoveDirRecursive(dir);

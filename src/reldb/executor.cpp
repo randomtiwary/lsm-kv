@@ -1,9 +1,17 @@
 #include "reldb/executor.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "lsmkv/debug.h"
+#include "lsmkv/encoding.h"
 #include "reldb/macros.h"
+#include "reldb/row.h"
 
 namespace reldb {
 namespace {
@@ -388,6 +396,274 @@ lsmkv::Status LimitExecutor::Open() {
     produced_ = 0;
     return STATUS(OK);
 }
+
+// ---------------------------------------------------------------------------
+// Hash aggregate
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// *sum += delta with Int64 overflow check.
+lsmkv::Status AddChecked(std::int64_t* sum, std::int64_t delta) {
+    LSMKV_DCHECK(sum != nullptr);
+    if ((delta > 0 && *sum > std::numeric_limits<std::int64_t>::max() - delta) ||
+        (delta < 0 && *sum < std::numeric_limits<std::int64_t>::min() - delta)) {
+        return STATUS(InvalidArgument, "SUM overflow");
+    }
+    *sum += delta;
+    return STATUS(OK);
+}
+
+// Stable encoding of a group key (length-prefixed cell encodings).
+std::string EncodeGroupKey(const std::vector<Value>& parts) {
+    std::string out;
+    for (const auto& v : parts) {
+        const std::string cell = Row::EncodeValue(v);
+        lsmkv::PutFixed32(&out, static_cast<std::uint32_t>(cell.size()));
+        out.append(cell);
+    }
+    return out;
+}
+
+struct AggAcc {
+    std::int64_t n = 0;  // contributing rows (COUNT; AVG denominator)
+    std::int64_t sum = 0;
+    std::int64_t minv = 0;
+    std::int64_t maxv = 0;
+    bool has_numeric = false;  // saw at least one non-null numeric arg
+};
+
+struct GroupState {
+    std::vector<Value> key_parts;
+    std::vector<AggAcc> accs;
+};
+
+lsmkv::Status Accumulate(const AggSpec& spec, const Row& row, AggAcc* acc) {
+    LSMKV_DCHECK(acc != nullptr);
+
+    if (spec.func == AggFunc::kCount && spec.star) {
+        ++acc->n;
+        return STATUS(OK);
+    }
+
+    if (spec.arg_column < 0 ||
+        static_cast<std::size_t>(spec.arg_column) >= row.size()) {
+        return STATUS(InvalidArgument, "aggregate column out of range");
+    }
+    const Value& cell = row.at(static_cast<std::size_t>(spec.arg_column));
+
+    if (spec.func == AggFunc::kCount) {
+        // COUNT(col): skip nulls.
+        if (!cell.IsNull()) ++acc->n;
+        return STATUS(OK);
+    }
+
+    // SUM / AVG / MIN / MAX require Int64 (nulls skipped).
+    if (cell.IsNull()) return STATUS(OK);
+    if (cell.type() != ColumnType::kInt64) {
+        return STATUS(InvalidArgument, "aggregate argument must be Int64");
+    }
+    const std::int64_t v = cell.GetInt64();
+    if (spec.func == AggFunc::kSum || spec.func == AggFunc::kAvg) {
+        RELDB_RETURN_NOT_OK(AddChecked(&acc->sum, v));
+        ++acc->n;
+        acc->has_numeric = true;
+        return STATUS(OK);
+    }
+    if (spec.func == AggFunc::kMin) {
+        if (!acc->has_numeric || v < acc->minv) acc->minv = v;
+        acc->has_numeric = true;
+        ++acc->n;
+        return STATUS(OK);
+    }
+    if (spec.func == AggFunc::kMax) {
+        if (!acc->has_numeric || v > acc->maxv) acc->maxv = v;
+        acc->has_numeric = true;
+        ++acc->n;
+        return STATUS(OK);
+    }
+    // Only COUNT/SUM/AVG/MIN/MAX exist; invalid values are a programming error.
+    LSMKV_DCHECK(false);
+    return STATUS(InvalidArgument, "unknown aggregate function");
+}
+
+lsmkv::Status FinalizeAgg(const AggSpec& spec, const AggAcc& acc, Value* out) {
+    LSMKV_DCHECK(out != nullptr);
+    switch (spec.func) {
+        case AggFunc::kCount:
+            *out = Value::Int64(acc.n);
+            return STATUS(OK);
+        case AggFunc::kSum:
+            if (!acc.has_numeric) {
+                *out = Value::Null();
+            } else {
+                *out = Value::Int64(acc.sum);
+            }
+            return STATUS(OK);
+        case AggFunc::kAvg:
+            if (!acc.has_numeric || acc.n == 0) {
+                *out = Value::Null();
+            } else {
+                // Truncating Int64 division toward zero.
+                *out = Value::Int64(acc.sum / acc.n);
+            }
+            return STATUS(OK);
+        case AggFunc::kMin:
+            if (!acc.has_numeric) {
+                *out = Value::Null();
+            } else {
+                *out = Value::Int64(acc.minv);
+            }
+            return STATUS(OK);
+        case AggFunc::kMax:
+            if (!acc.has_numeric) {
+                *out = Value::Null();
+            } else {
+                *out = Value::Int64(acc.maxv);
+            }
+            return STATUS(OK);
+    }
+    LSMKV_DCHECK(false);
+    return STATUS(InvalidArgument, "unknown aggregate function");
+}
+
+}  // namespace
+
+HashAggregateExecutor::HashAggregateExecutor(std::unique_ptr<Executor> child,
+                                             std::vector<int> group_by_columns,
+                                             std::vector<AggSpec> aggs)
+    : child_(std::move(child)),
+      group_by_columns_(std::move(group_by_columns)),
+      aggs_(std::move(aggs)) {}
+
+lsmkv::Status HashAggregateExecutor::Open() {
+    if (child_ == nullptr) return STATUS(InvalidArgument, "null child");
+    if (aggs_.empty()) return STATUS(InvalidArgument, "empty aggregate list");
+    for (const auto& a : aggs_) {
+        if (a.output_name.empty()) {
+            return STATUS(InvalidArgument, "aggregate output_name is empty");
+        }
+        if (a.star) {
+            if (a.func != AggFunc::kCount) {
+                return STATUS(InvalidArgument, "only COUNT(*) uses star");
+            }
+        } else if (a.arg_column < 0) {
+            return STATUS(InvalidArgument, "aggregate arg_column is required");
+        }
+    }
+    RELDB_RETURN_NOT_OK(EnsureOpenable(&opened_));
+    plan_tag_ = "HashAggregate<-" + child_->PlanTag();
+    RELDB_RETURN_NOT_OK(child_->Open());
+
+    const auto& child_names = child_->column_names();
+    column_names_.clear();
+    column_names_.reserve(group_by_columns_.size() + aggs_.size());
+    for (int idx : group_by_columns_) {
+        if (idx < 0 || static_cast<std::size_t>(idx) >= child_names.size()) {
+            return STATUS(InvalidArgument, "GROUP BY column out of range");
+        }
+        column_names_.push_back(child_names[static_cast<std::size_t>(idx)]);
+    }
+    for (const auto& a : aggs_) {
+        column_names_.push_back(a.output_name);
+    }
+
+    std::unordered_map<std::string, GroupState> groups;
+    std::vector<std::string> order;  // first-seen group key order
+
+    bool has_row = false;
+    for (;;) {
+        RELDB_RETURN_NOT_OK(child_->Next(&has_row));
+        if (!has_row) break;
+        const Row& row = child_->current_row();
+
+        std::vector<Value> key_parts;
+        key_parts.reserve(group_by_columns_.size());
+        for (int idx : group_by_columns_) {
+            if (idx < 0 || static_cast<std::size_t>(idx) >= row.size()) {
+                return STATUS(InvalidArgument, "GROUP BY column out of range");
+            }
+            key_parts.push_back(row.at(static_cast<std::size_t>(idx)));
+        }
+        const std::string key = EncodeGroupKey(key_parts);
+
+        auto it = groups.find(key);
+        if (it == groups.end()) {
+            GroupState st;
+            st.key_parts = std::move(key_parts);
+            st.accs.assign(aggs_.size(), AggAcc{});
+            order.push_back(key);
+            it = groups.emplace(key, std::move(st)).first;
+        }
+        for (std::size_t i = 0; i < aggs_.size(); ++i) {
+            RELDB_RETURN_NOT_OK(Accumulate(aggs_[i], row, &it->second.accs[i]));
+        }
+    }
+    // Child fully drained; drop it so any underlying scan is released.
+    child_.reset();
+
+    if (groups.empty()) {
+        if (group_by_columns_.empty()) {
+            // Scalar aggregate on empty input: one result row.
+            std::vector<Value> cells;
+            cells.reserve(aggs_.size());
+            for (const auto& a : aggs_) {
+                AggAcc empty;
+                Value v;
+                RELDB_RETURN_NOT_OK(FinalizeAgg(a, empty, &v));
+                cells.push_back(std::move(v));
+            }
+            rows_.push_back(Row(std::move(cells)));
+        }
+        // With GROUP BY and no input: zero rows.
+        index_ = 0;
+        return STATUS(OK);
+    }
+
+    rows_.reserve(order.size());
+    for (const auto& key : order) {
+        const GroupState& st = groups.at(key);
+        std::vector<Value> cells;
+        cells.reserve(st.key_parts.size() + aggs_.size());
+        for (const auto& k : st.key_parts) {
+            cells.push_back(k);
+        }
+        for (std::size_t i = 0; i < aggs_.size(); ++i) {
+            Value v;
+            RELDB_RETURN_NOT_OK(FinalizeAgg(aggs_[i], st.accs[i], &v));
+            cells.push_back(std::move(v));
+        }
+        rows_.push_back(Row(std::move(cells)));
+    }
+    index_ = 0;
+    return STATUS(OK);
+}
+
+lsmkv::Status HashAggregateExecutor::Next(bool* has_row) {
+    if (has_row == nullptr) return STATUS(InvalidArgument, "null has_row");
+    if (!opened_) return STATUS(InvalidArgument, "executor not opened");
+    if (index_ >= rows_.size()) {
+        *has_row = false;
+        return STATUS(OK);
+    }
+    current_ = rows_[index_];
+    ++index_;
+    *has_row = true;
+    return STATUS(OK);
+}
+
+const Row& HashAggregateExecutor::current_row() const { return current_; }
+
+std::string HashAggregateExecutor::PlanTag() const {
+    if (child_ != nullptr) {
+        return "HashAggregate<-" + child_->PlanTag();
+    }
+    return plan_tag_;
+}
+
+// ---------------------------------------------------------------------------
+// Limit (continued)
+// ---------------------------------------------------------------------------
 
 lsmkv::Status LimitExecutor::Next(bool* has_row) {
     if (has_row == nullptr) return STATUS(InvalidArgument, "null has_row");
