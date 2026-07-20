@@ -345,13 +345,54 @@ lsmkv::Status SqlSession::PlanAccess(Transaction& txn, const TableSchema& schema
     return STATUS(OK);
 }
 
+namespace {
+
+const char* AggFuncName(AggFunc f) {
+    switch (f) {
+        case AggFunc::kCount: return "COUNT";
+        case AggFunc::kSum: return "SUM";
+        case AggFunc::kAvg: return "AVG";
+        case AggFunc::kMin: return "MIN";
+        case AggFunc::kMax: return "MAX";
+    }
+    return "AGG";
+}
+
+// Default result column name for an aggregate (alias wins if set).
+std::string AggOutputName(const SelectItem& item) {
+    if (!item.alias.empty()) return item.alias;
+    std::string s = AggFuncName(item.agg_func);
+    s += '(';
+    if (item.agg_star) {
+        s += '*';
+    } else {
+        s += item.agg_column;
+    }
+    s += ')';
+    return s;
+}
+
+}  // namespace
+
 lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
     TableSchema schema;
     RELDB_RETURN_NOT_OK(LookupTable(stmt.from.table_name, &schema));
 
-    // Not supported yet (fields exist on SelectStmt for forward compatibility).
-    RELDB_FAIL_IF(!stmt.group_by.empty(), InvalidArgument, "GROUP BY is not supported");
     RELDB_FAIL_IF(stmt.having != nullptr, InvalidArgument, "HAVING is not supported");
+
+    bool has_agg = false;
+    for (const auto& item : stmt.select_list) {
+        if (item.kind == SelectItem::Kind::kAgg) {
+            has_agg = true;
+            break;
+        }
+    }
+    const bool has_group = !stmt.group_by.empty();
+    const bool agg_plan = has_agg || has_group;
+
+    if (stmt.select_star && agg_plan) {
+        return STATUS(InvalidArgument, "SELECT * cannot be combined with aggregates or GROUP BY");
+    }
 
     AutoTxnGuard auto_txn(*this);
     RELDB_RETURN_NOT_OK(auto_txn.Ensure());
@@ -361,32 +402,147 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
     RELDB_RETURN_NOT_OK(
         PlanAccess(*txn_, schema, std::move(stmt.where), &plan, &access_tag));
 
-    // Projection names (for ORDER BY after Project).
+    // Projection / output names (for ORDER BY after the final Project).
     std::vector<std::string> out_names;
-    if (!stmt.select_star) {
+
+    if (!agg_plan) {
+        // Non-aggregate SELECT (existing path).
+        if (!stmt.select_star) {
+            RELDB_RETURN_IF(stmt.select_list.empty(),
+                            auto_txn.Complete(STATUS(InvalidArgument, "empty SELECT list")));
+            std::vector<Projection> projs;
+            projs.reserve(stmt.select_list.size());
+            out_names.reserve(stmt.select_list.size());
+            for (auto& item : stmt.select_list) {
+                RELDB_RETURN_IF(item.kind != SelectItem::Kind::kExpr,
+                                auto_txn.Complete(STATUS(InvalidArgument,
+                                                         "unexpected aggregate")));
+                RELDB_RETURN_IF(item.expr == nullptr,
+                                auto_txn.Complete(STATUS(InvalidArgument,
+                                                         "null select expression")));
+                auto& e = item.expr;
+                std::string name;
+                if (!item.alias.empty()) {
+                    name = item.alias;
+                } else if (e->kind() == Expr::Kind::kColumn) {
+                    name = e->column_name();
+                } else {
+                    name = e->ToString();
+                }
+                RELDB_RETURN_NOT_OK(e->Bind(schema));
+                out_names.push_back(name);
+                projs.push_back(Projection{std::move(name), std::move(e)});
+            }
+            plan = std::make_unique<ProjectExecutor>(std::move(plan), schema, std::move(projs));
+        } else {
+            for (const auto& c : schema.columns()) {
+                out_names.push_back(c.name);
+            }
+        }
+    } else {
+        // Aggregate / GROUP BY path:
+        //   access → HashAggregate → Project (select-list order) → Sort → Limit
         RELDB_RETURN_IF(stmt.select_list.empty(),
                         auto_txn.Complete(STATUS(InvalidArgument, "empty SELECT list")));
-        std::vector<Projection> projs;
-        projs.reserve(stmt.select_list.size());
-        out_names.reserve(stmt.select_list.size());
-        for (auto& item : stmt.select_list) {
-            RELDB_RETURN_IF(item.kind != SelectItem::Kind::kExpr,
+
+        // Resolve GROUP BY columns → indices into the input schema.
+        std::vector<int> group_indices;
+        group_indices.reserve(stmt.group_by.size());
+        for (const auto& col : stmt.group_by) {
+            const int idx = schema.ColumnIndex(col);
+            RELDB_RETURN_IF(idx < 0,
                             auto_txn.Complete(STATUS(InvalidArgument,
-                                                     "aggregates are not supported")));
+                                                     "unknown GROUP BY column: " + col)));
+            group_indices.push_back(idx);
+        }
+
+        // Bind select list: non-agg items must be GROUP BY columns; collect AggSpecs.
+        std::vector<AggSpec> aggs;
+        // For each select item: source column name in the HashAggregate output.
+        std::vector<std::string> select_sources;
+        select_sources.reserve(stmt.select_list.size());
+        out_names.reserve(stmt.select_list.size());
+
+        for (auto& item : stmt.select_list) {
+            if (item.kind == SelectItem::Kind::kAgg) {
+                AggSpec spec;
+                spec.func = item.agg_func;
+                spec.star = item.agg_star;
+                if (!item.agg_star) {
+                    const int cidx = schema.ColumnIndex(item.agg_column);
+                    RELDB_RETURN_IF(cidx < 0,
+                                    auto_txn.Complete(STATUS(
+                                        InvalidArgument,
+                                        "unknown aggregate column: " + item.agg_column)));
+                    spec.arg_column = cidx;
+                }
+                spec.output_name = AggOutputName(item);
+                select_sources.push_back(spec.output_name);
+                out_names.push_back(spec.output_name);
+                aggs.push_back(std::move(spec));
+                continue;
+            }
+
+            // Non-aggregate: must be a bare column that appears in GROUP BY.
             RELDB_RETURN_IF(item.expr == nullptr,
                             auto_txn.Complete(STATUS(InvalidArgument, "null select expression")));
-            auto& e = item.expr;
-            std::string name =
-                (e->kind() == Expr::Kind::kColumn) ? e->column_name() : e->ToString();
-            RELDB_RETURN_NOT_OK(e->Bind(schema));
-            out_names.push_back(name);
-            projs.push_back(Projection{std::move(name), std::move(e)});
+            RELDB_RETURN_IF(item.expr->kind() != Expr::Kind::kColumn,
+                            auto_txn.Complete(STATUS(
+                                InvalidArgument,
+                                "SELECT with aggregates requires GROUP BY columns or aggregates")));
+            const std::string& col = item.expr->column_name();
+            bool in_group = false;
+            for (const auto& g : stmt.group_by) {
+                if (g == col) {
+                    in_group = true;
+                    break;
+                }
+            }
+            // Scalar aggregate query (no GROUP BY): non-agg columns are illegal.
+            RELDB_RETURN_IF(!in_group,
+                            auto_txn.Complete(STATUS(
+                                InvalidArgument,
+                                "column must appear in GROUP BY: " + col)));
+            const std::string out =
+                !item.alias.empty() ? item.alias : col;
+            select_sources.push_back(col);  // HashAggregate names group cols from input
+            out_names.push_back(out);
         }
-        plan = std::make_unique<ProjectExecutor>(std::move(plan), schema, std::move(projs));
-    } else {
-        for (const auto& c : schema.columns()) {
-            out_names.push_back(c.name);
+
+        plan = std::make_unique<HashAggregateExecutor>(std::move(plan), std::move(group_indices),
+                                                       std::move(aggs));
+
+        // Synthetic schema matching HashAggregate output: group keys then aggs.
+        std::vector<ColumnDef> agg_cols;
+        bool saw_pk = false;
+        for (const auto& gname : stmt.group_by) {
+            const int gidx = schema.ColumnIndex(gname);
+            ColumnDef c = schema.columns()[static_cast<std::size_t>(gidx)];
+            c.primary_key = !saw_pk;
+            saw_pk = true;
+            agg_cols.push_back(std::move(c));
         }
+        for (const auto& item : stmt.select_list) {
+            if (item.kind != SelectItem::Kind::kAgg) continue;
+            ColumnDef c{AggOutputName(item), ColumnType::kInt64, !saw_pk};
+            saw_pk = true;
+            agg_cols.push_back(std::move(c));
+        }
+        if (agg_cols.empty()) {
+            return auto_txn.Complete(STATUS(InvalidArgument, "empty SELECT list"));
+        }
+        TableSchema agg_schema(schema.name(), std::move(agg_cols));
+        RELDB_RETURN_NOT_OK(agg_schema.Validate());
+
+        // Project HashAggregate output into select-list order / aliases.
+        std::vector<Projection> projs;
+        projs.reserve(select_sources.size());
+        for (std::size_t i = 0; i < select_sources.size(); ++i) {
+            auto e = Expr::Column(select_sources[i]);
+            RELDB_RETURN_NOT_OK(e->Bind(agg_schema));
+            projs.push_back(Projection{out_names[i], std::move(e)});
+        }
+        plan = std::make_unique<ProjectExecutor>(std::move(plan), agg_schema, std::move(projs));
     }
 
     if (!stmt.order_by.empty()) {

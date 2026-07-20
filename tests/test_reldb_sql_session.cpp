@@ -244,8 +244,7 @@ TEST(reldb_sql_session_drop_table) {
     RemoveDirRecursive(dir);
 }
 
-// Aggregates and GROUP BY parse, but execution is not wired yet.
-TEST(reldb_sql_session_aggregates_not_executed) {
+TEST(reldb_sql_session_aggregates_e2e) {
     auto dir = MakeTempDir("reldb_sql_sess_agg");
     {
         auto db = OpenDb(dir);
@@ -254,14 +253,60 @@ TEST(reldb_sql_session_aggregates_not_executed) {
         reldb::QueryResult r;
 
         EXPECT_OK(session.Execute(
-                      "CREATE TABLE t(id INT PRIMARY KEY, score INT);", r),
+                      "CREATE TABLE t(id INT PRIMARY KEY, name TEXT, score INT);", r),
                   "create");
-        EXPECT_OK(session.Execute("INSERT INTO t VALUES (1, 10);", r), "ins");
+        EXPECT_OK(session.Execute("INSERT INTO t VALUES (1, 'ada', 10);", r), "i1");
+        EXPECT_OK(session.Execute("INSERT INTO t VALUES (2, 'ada', 30);", r), "i2");
+        EXPECT_OK(session.Execute("INSERT INTO t VALUES (3, 'bob', 20);", r), "i3");
 
-        expect(session.Execute("SELECT COUNT(*) FROM t;", r).IsInvalidArgument(),
-               "count not exec");
-        expect(session.Execute("SELECT score FROM t GROUP BY score;", r).IsInvalidArgument(),
-               "group not exec");
+        // Scalar COUNT / SUM / AVG
+        EXPECT_OK(session.Execute("SELECT COUNT(*) FROM t;", r), "count");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "1 row");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(3), "cnt 3");
+        expect(r.plan_tag.find("HashAggregate") != std::string::npos, "tag has HashAggregate");
+
+        EXPECT_OK(session.Execute("SELECT SUM(score), AVG(score) FROM t;", r), "sum avg");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(60), "sum");
+        expect_eq(r.rows[0].at(1).GetInt64(), static_cast<std::int64_t>(20), "avg");
+
+        // Empty table scalar
+        EXPECT_OK(session.Execute("CREATE TABLE empty(id INT PRIMARY KEY, v INT);", r), "empty t");
+        EXPECT_OK(session.Execute("SELECT COUNT(*) FROM empty;", r), "empty count");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(0), "0");
+        EXPECT_OK(session.Execute("SELECT SUM(v) FROM empty;", r), "empty sum");
+        expect(r.rows[0].at(0).IsNull(), "sum null");
+
+        // GROUP BY
+        EXPECT_OK(session.Execute(
+                      "SELECT name, COUNT(*) AS n, SUM(score) FROM t GROUP BY name;", r),
+                  "group");
+        expect_eq(static_cast<int>(r.rows.size()), 2, "2 groups");
+        // first-seen: ada then bob
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "ada");
+        expect_eq(r.rows[0].at(1).GetInt64(), static_cast<std::int64_t>(2), "ada n");
+        expect_eq(r.rows[0].at(2).GetInt64(), static_cast<std::int64_t>(40), "ada sum");
+        expect_eq(r.rows[1].at(0).GetString(), std::string("bob"), "bob");
+        expect_eq(r.rows[1].at(1).GetInt64(), static_cast<std::int64_t>(1), "bob n");
+
+        // GROUP BY with no aggregate
+        EXPECT_OK(session.Execute("SELECT name FROM t GROUP BY name;", r), "gb only");
+        expect_eq(static_cast<int>(r.rows.size()), 2, "2 names");
+
+        // ORDER BY aggregate output name
+        EXPECT_OK(session.Execute(
+                      "SELECT name, COUNT(*) AS n FROM t GROUP BY name ORDER BY n DESC;", r),
+                  "order");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "ada first");
+        expect_eq(r.rows[0].at(1).GetInt64(), static_cast<std::int64_t>(2), "n 2");
+
+        // Rejects
+        expect(session.Execute("SELECT * FROM t GROUP BY name;", r).IsInvalidArgument(),
+               "star group");
+        expect(session.Execute("SELECT id, COUNT(*) FROM t;", r).IsInvalidArgument(),
+               "id not in group");
+        expect(session.Execute("SELECT COUNT(*) FROM t HAVING COUNT(*) > 0;", r)
+                   .IsInvalidArgument(),
+               "having");
     }
     RemoveDirRecursive(dir);
 }
