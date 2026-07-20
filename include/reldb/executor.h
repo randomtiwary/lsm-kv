@@ -12,6 +12,7 @@
 #include "reldb/query_result.h"
 #include "reldb/row.h"
 #include "reldb/schema.h"
+#include "reldb/sql_ast.h"  // AggFunc
 #include "reldb/txn.h"
 #include "reldb/types.h"
 
@@ -33,7 +34,7 @@ namespace reldb {
 // Scan lifetime: destroy scan-bearing executors (or fully exhaust them) before
 // Commit / Abort / further writes on the same transaction. TableRowScan may
 // hold DB iterator locks that block writers. UpdateOp / DeleteOp / SortExecutor
-// already materialize and drop their child for this reason.
+// / HashAggregateExecutor already materialize and drop their child for this reason.
 //
 // PlanTag() composes child tags for educational EXPLAIN-style checks, e.g.
 //   "Limit<-Filter<-SeqScan".
@@ -222,6 +223,48 @@ private:
     std::uint64_t limit_;
     std::uint64_t produced_ = 0;
     bool opened_ = false;
+};
+
+// One aggregate to compute over a group (or the whole input if no GROUP BY).
+// COUNT(*) uses star=true; other aggs use arg_column into the child row.
+// SUM/AVG/MIN/MAX require Int64 argument columns. COUNT always Int64.
+// Overflow on SUM/AVG accumulation → InvalidArgument.
+struct AggSpec {
+    AggFunc func = AggFunc::kCount;
+    bool star = false;
+    int arg_column = -1;
+    std::string output_name;
+};
+
+// Hash aggregate: materialize child in Open(), release child (same lifetime as
+// Sort). Output columns are group-by cells (in group_by_columns order) followed
+// by aggregate results (in aggs order).
+//
+// Empty input:
+//   - no group-by (scalar): one row; COUNT → 0; SUM/AVG/MIN/MAX → Null
+//   - with group-by: zero rows
+class HashAggregateExecutor : public Executor {
+public:
+    // group_by_columns: indices into the child row (may be empty for scalar agg).
+    HashAggregateExecutor(std::unique_ptr<Executor> child,
+                          std::vector<int> group_by_columns, std::vector<AggSpec> aggs);
+
+    lsmkv::Status Open() override;
+    lsmkv::Status Next(bool* has_row) override;
+    const Row& current_row() const override;
+    const std::vector<std::string>& column_names() const override { return column_names_; }
+    std::string PlanTag() const override;
+
+private:
+    std::unique_ptr<Executor> child_;
+    std::vector<int> group_by_columns_;
+    std::vector<AggSpec> aggs_;
+    bool opened_ = false;
+    std::vector<std::string> column_names_;
+    std::string plan_tag_ = "HashAggregate";
+    std::vector<Row> rows_;
+    std::size_t index_ = 0;
+    Row current_;
 };
 
 // ---------------------------------------------------------------------------
