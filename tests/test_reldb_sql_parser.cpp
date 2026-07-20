@@ -310,10 +310,6 @@ TEST(reldb_sql_parse_reject_unsupported) {
            "union");
     expect(reldb::ParseStatement("SELECT * FROM (SELECT * FROM t)", &s).IsInvalidArgument(),
            "subquery");
-    expect(reldb::ParseStatement("SELECT COUNT(*) FROM t HAVING COUNT(*) > 1", &s)
-               .IsInvalidArgument(),
-           "having");
-
     // Trailing junk
     expect(reldb::ParseStatement("BEGIN COMMIT", &s).IsInvalidArgument(), "junk");
     // Bad syntax
@@ -396,4 +392,29 @@ TEST(reldb_sql_parse_aggregates_and_group_by) {
     // SUM(a+b) not supported (only column ref)
     expect(reldb::ParseStatement("SELECT SUM(score + 1) FROM t", &s).IsInvalidArgument(),
            "sum expr");
+}
+
+TEST(reldb_sql_parse_having) {
+    reldb::Statement s;
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT name, COUNT(*) FROM t GROUP BY name HAVING COUNT(*) > 1", &s),
+              "having count");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect(sel.having != nullptr, "has having");
+        expect_eq(reldb::ToString(s),
+                  std::string("Select([Column(name), COUNT(*)] FROM t GROUP BY [name] "
+                              "HAVING Compare(Gt, Column(COUNT(*)), Literal(1)))"),
+                  "print");
+    }
+
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT COUNT(*) AS n FROM t HAVING n > 0", &s),
+              "having alias needs bind fail or col n");
+    // Parsed as Column(n); ok at parse time.
+    expect(std::get<reldb::SelectStmt>(s).having != nullptr, "having n");
+
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT name, SUM(score) FROM t GROUP BY name HAVING name = 'ada'", &s),
+              "having group col");
 }

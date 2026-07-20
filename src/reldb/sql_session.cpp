@@ -358,9 +358,9 @@ const char* AggFuncName(AggFunc f) {
     return "AGG";
 }
 
-// Default result column name for an aggregate (alias wins if set).
-std::string AggOutputName(const SelectItem& item) {
-    if (!item.alias.empty()) return item.alias;
+// Aggregate result column name without AS (COUNT(*) / SUM(col) / …).
+// HashAggregate and HAVING use these names; Project applies aliases.
+std::string DefaultAggResultName(const SelectItem& item) {
     std::string s = AggFuncName(item.agg_func);
     s += '(';
     if (item.agg_star) {
@@ -372,13 +372,17 @@ std::string AggOutputName(const SelectItem& item) {
     return s;
 }
 
+// Final select-list name (alias if present).
+std::string AggOutputName(const SelectItem& item) {
+    if (!item.alias.empty()) return item.alias;
+    return DefaultAggResultName(item);
+}
+
 }  // namespace
 
 lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
     TableSchema schema;
     RELDB_RETURN_NOT_OK(LookupTable(stmt.from.table_name, &schema));
-
-    RELDB_FAIL_IF(stmt.having != nullptr, InvalidArgument, "HAVING is not supported");
 
     bool has_agg = false;
     for (const auto& item : stmt.select_list) {
@@ -392,6 +396,9 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
 
     if (stmt.select_star && agg_plan) {
         return STATUS(InvalidArgument, "SELECT * cannot be combined with aggregates or GROUP BY");
+    }
+    if (stmt.having != nullptr && !agg_plan) {
+        return STATUS(InvalidArgument, "HAVING requires aggregates or GROUP BY");
     }
 
     AutoTxnGuard auto_txn(*this);
@@ -441,7 +448,7 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         }
     } else {
         // Aggregate / GROUP BY path:
-        //   access → HashAggregate → Project (select-list order) → Sort → Limit
+        //   access → HashAggregate → [Filter HAVING] → Project → Sort → Limit
         RELDB_RETURN_IF(stmt.select_list.empty(),
                         auto_txn.Complete(STATUS(InvalidArgument, "empty SELECT list")));
 
@@ -476,9 +483,10 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
                                         "unknown aggregate column: " + item.agg_column)));
                     spec.arg_column = cidx;
                 }
-                spec.output_name = AggOutputName(item);
+                // HashAggregate / HAVING use default names; Project applies AS.
+                spec.output_name = DefaultAggResultName(item);
                 select_sources.push_back(spec.output_name);
-                out_names.push_back(spec.output_name);
+                out_names.push_back(AggOutputName(item));
                 aggs.push_back(std::move(spec));
                 continue;
             }
@@ -513,6 +521,7 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
                                                        std::move(aggs));
 
         // Synthetic schema matching HashAggregate output: group keys then aggs.
+        // HAVING binds against this schema (group names + aggregate output names).
         std::vector<ColumnDef> agg_cols;
         bool saw_pk = false;
         for (const auto& gname : stmt.group_by) {
@@ -524,7 +533,7 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         }
         for (const auto& item : stmt.select_list) {
             if (item.kind != SelectItem::Kind::kAgg) continue;
-            ColumnDef c{AggOutputName(item), ColumnType::kInt64, !saw_pk};
+            ColumnDef c{DefaultAggResultName(item), ColumnType::kInt64, !saw_pk};
             saw_pk = true;
             agg_cols.push_back(std::move(c));
         }
@@ -534,7 +543,13 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         TableSchema agg_schema(schema.name(), std::move(agg_cols));
         RELDB_RETURN_NOT_OK(agg_schema.Validate());
 
-        // Project HashAggregate output into select-list order / aliases.
+        if (stmt.having != nullptr) {
+            RELDB_RETURN_NOT_OK(stmt.having->Bind(agg_schema));
+            plan = std::make_unique<FilterExecutor>(std::move(plan), agg_schema,
+                                                    std::move(stmt.having));
+        }
+
+        // Project HashAggregate (post-HAVING) output into select-list order / aliases.
         std::vector<Projection> projs;
         projs.reserve(select_sources.size());
         for (std::size_t i = 0; i < select_sources.size(); ++i) {

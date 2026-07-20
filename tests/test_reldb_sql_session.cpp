@@ -299,14 +299,36 @@ TEST(reldb_sql_session_aggregates_e2e) {
         expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "ada first");
         expect_eq(r.rows[0].at(1).GetInt64(), static_cast<std::int64_t>(2), "n 2");
 
+        // HAVING COUNT(*) / group column
+        EXPECT_OK(session.Execute(
+                      "SELECT name, COUNT(*) FROM t GROUP BY name HAVING COUNT(*) > 1;", r),
+                  "having");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "ada only");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "ada");
+        expect_eq(r.rows[0].at(1).GetInt64(), static_cast<std::int64_t>(2), "cnt 2");
+        expect(r.plan_tag.find("Filter") != std::string::npos, "filter in plan");
+
+        EXPECT_OK(session.Execute(
+                      "SELECT name, SUM(score) FROM t GROUP BY name HAVING name = 'bob';", r),
+                  "having name");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "bob only");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("bob"), "bob");
+
+        // Scalar HAVING
+        EXPECT_OK(session.Execute("SELECT COUNT(*) FROM t HAVING COUNT(*) >= 3;", r),
+                  "scalar having");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "pass");
+        EXPECT_OK(session.Execute("SELECT COUNT(*) FROM t HAVING COUNT(*) > 10;", r),
+                  "scalar fail");
+        expect_eq(static_cast<int>(r.rows.size()), 0, "filtered out");
+
         // Rejects
         expect(session.Execute("SELECT * FROM t GROUP BY name;", r).IsInvalidArgument(),
                "star group");
         expect(session.Execute("SELECT id, COUNT(*) FROM t;", r).IsInvalidArgument(),
                "id not in group");
-        expect(session.Execute("SELECT COUNT(*) FROM t HAVING COUNT(*) > 0;", r)
-                   .IsInvalidArgument(),
-               "having");
+        expect(session.Execute("SELECT name FROM t HAVING name = 'x';", r).IsInvalidArgument(),
+               "having without agg/group");
     }
     RemoveDirRecursive(dir);
 }
