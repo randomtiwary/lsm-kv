@@ -538,7 +538,11 @@ HashAggregateExecutor::HashAggregateExecutor(std::unique_ptr<Executor> child,
 
 lsmkv::Status HashAggregateExecutor::Open() {
     if (child_ == nullptr) return STATUS(InvalidArgument, "null child");
-    if (aggs_.empty()) return STATUS(InvalidArgument, "empty aggregate list");
+    // Scalar aggregate requires at least one agg; GROUP BY alone may have none
+    // (e.g. SELECT name FROM t GROUP BY name).
+    if (aggs_.empty() && group_by_columns_.empty()) {
+        return STATUS(InvalidArgument, "empty aggregate list");
+    }
     for (const auto& a : aggs_) {
         if (a.output_name.empty()) {
             return STATUS(InvalidArgument, "aggregate output_name is empty");
