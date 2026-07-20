@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "lsmkv/debug.h"
 #include "lsmkv/encoding.h"
 #include "reldb/macros.h"
 #include "reldb/row.h"
@@ -402,13 +403,14 @@ lsmkv::Status LimitExecutor::Open() {
 
 namespace {
 
-lsmkv::Status AddChecked(std::int64_t a, std::int64_t b, std::int64_t* out) {
-    if (out == nullptr) return STATUS(InvalidArgument, "null out");
-    if ((b > 0 && a > std::numeric_limits<std::int64_t>::max() - b) ||
-        (b < 0 && a < std::numeric_limits<std::int64_t>::min() - b)) {
+// *sum += delta with Int64 overflow check.
+lsmkv::Status AddChecked(std::int64_t* sum, std::int64_t delta) {
+    LSMKV_DCHECK(sum != nullptr);
+    if ((delta > 0 && *sum > std::numeric_limits<std::int64_t>::max() - delta) ||
+        (delta < 0 && *sum < std::numeric_limits<std::int64_t>::min() - delta)) {
         return STATUS(InvalidArgument, "SUM overflow");
     }
-    *out = a + b;
+    *sum += delta;
     return STATUS(OK);
 }
 
@@ -437,7 +439,7 @@ struct GroupState {
 };
 
 lsmkv::Status Accumulate(const AggSpec& spec, const Row& row, AggAcc* acc) {
-    if (acc == nullptr) return STATUS(InvalidArgument, "null acc");
+    LSMKV_DCHECK(acc != nullptr);
 
     if (spec.func == AggFunc::kCount && spec.star) {
         ++acc->n;
@@ -463,7 +465,7 @@ lsmkv::Status Accumulate(const AggSpec& spec, const Row& row, AggAcc* acc) {
     }
     const std::int64_t v = cell.GetInt64();
     if (spec.func == AggFunc::kSum || spec.func == AggFunc::kAvg) {
-        RELDB_RETURN_NOT_OK(AddChecked(acc->sum, v, &acc->sum));
+        RELDB_RETURN_NOT_OK(AddChecked(&acc->sum, v));
         ++acc->n;
         acc->has_numeric = true;
         return STATUS(OK);
@@ -480,11 +482,13 @@ lsmkv::Status Accumulate(const AggSpec& spec, const Row& row, AggAcc* acc) {
         ++acc->n;
         return STATUS(OK);
     }
+    // Only COUNT/SUM/AVG/MIN/MAX exist; invalid values are a programming error.
+    LSMKV_DCHECK(false);
     return STATUS(InvalidArgument, "unknown aggregate function");
 }
 
 lsmkv::Status FinalizeAgg(const AggSpec& spec, const AggAcc& acc, Value* out) {
-    if (out == nullptr) return STATUS(InvalidArgument, "null out");
+    LSMKV_DCHECK(out != nullptr);
     switch (spec.func) {
         case AggFunc::kCount:
             *out = Value::Int64(acc.n);
@@ -519,6 +523,7 @@ lsmkv::Status FinalizeAgg(const AggSpec& spec, const AggAcc& acc, Value* out) {
             }
             return STATUS(OK);
     }
+    LSMKV_DCHECK(false);
     return STATUS(InvalidArgument, "unknown aggregate function");
 }
 

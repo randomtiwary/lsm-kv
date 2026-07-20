@@ -12,7 +12,7 @@
 #include "reldb/query_result.h"
 #include "reldb/row.h"
 #include "reldb/schema.h"
-#include "reldb/sql_ast.h"  // AggFunc
+#include "reldb/sql_ast.h"
 #include "reldb/txn.h"
 #include "reldb/types.h"
 
