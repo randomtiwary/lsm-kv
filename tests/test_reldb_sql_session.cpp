@@ -322,6 +322,30 @@ TEST(reldb_sql_session_aggregates_e2e) {
                   "scalar fail");
         expect_eq(static_cast<int>(r.rows.size()), 0, "filtered out");
 
+        // Dual alias for same aggregate (deduped HashAggregate column).
+        EXPECT_OK(session.Execute("SELECT COUNT(*) AS a, COUNT(*) AS b FROM t;", r),
+                  "dual alias");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "one");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(3), "a");
+        expect_eq(r.rows[0].at(1).GetInt64(), static_cast<std::int64_t>(3), "b");
+        expect_eq(r.column_names[0], std::string("a"), "col a");
+        expect_eq(r.column_names[1], std::string("b"), "col b");
+
+        // Projected alias + HAVING by default agg name.
+        EXPECT_OK(session.Execute(
+                      "SELECT SUM(score) AS total FROM t HAVING SUM(score) > 50;", r),
+                  "alias proj having default");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "pass sum");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(60), "total");
+        expect_eq(r.column_names[0], std::string("total"), "total name");
+
+        // HAVING aggregate not in SELECT list (still computed for filter).
+        EXPECT_OK(session.Execute(
+                      "SELECT name FROM t GROUP BY name HAVING COUNT(*) > 1;", r),
+                  "having only agg");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "ada");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "ada name");
+
         // Rejects
         expect(session.Execute("SELECT * FROM t GROUP BY name;", r).IsInvalidArgument(),
                "star group");
@@ -329,6 +353,10 @@ TEST(reldb_sql_session_aggregates_e2e) {
                "id not in group");
         expect(session.Execute("SELECT name FROM t HAVING name = 'x';", r).IsInvalidArgument(),
                "having without agg/group");
+        // AS aliases are not visible in HAVING (use COUNT(*) not n).
+        expect(session.Execute("SELECT COUNT(*) AS n FROM t HAVING n > 0;", r)
+                   .IsInvalidArgument(),
+               "having alias");
     }
     RemoveDirRecursive(dir);
 }

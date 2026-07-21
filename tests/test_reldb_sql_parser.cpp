@@ -408,10 +408,10 @@ TEST(reldb_sql_parse_having) {
                   "print");
     }
 
+    // Parses as Column(n); session bind rejects (HAVING uses default agg names, not AS).
     EXPECT_OK(reldb::ParseStatement(
                   "SELECT COUNT(*) AS n FROM t HAVING n > 0", &s),
-              "having alias needs bind fail or col n");
-    // Parsed as Column(n); ok at parse time.
+              "having alias parse only");
     expect(std::get<reldb::SelectStmt>(s).having != nullptr, "having n");
 
     EXPECT_OK(reldb::ParseStatement(

@@ -1031,26 +1031,6 @@ private:
         }
     }
 
-    // Default aggregate result name (no alias): COUNT(*) / SUM(col) / …
-    static std::string DefaultAggResultName(AggFunc f, bool star, const std::string& col) {
-        std::string s;
-        switch (f) {
-            case AggFunc::kCount: s = "COUNT"; break;
-            case AggFunc::kSum: s = "SUM"; break;
-            case AggFunc::kAvg: s = "AVG"; break;
-            case AggFunc::kMin: s = "MIN"; break;
-            case AggFunc::kMax: s = "MAX"; break;
-        }
-        s += '(';
-        if (star) {
-            s += '*';
-        } else {
-            s += col;
-        }
-        s += ')';
-        return s;
-    }
-
     lsmkv::Status ParsePrimary(std::unique_ptr<Expr>* out) {
         if (lex_.Match(TokenKind::kLParen)) {
             RELDB_RETURN_NOT_OK(ParseExpr(out));
