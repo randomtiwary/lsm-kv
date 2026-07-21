@@ -95,9 +95,22 @@ struct SelectItem {
     std::string output_name;     // result column name after binding
 };
 
-// FROM clause. Currently a single table; joins can extend this later.
-struct FromClause {
+// One table reference in FROM / JOIN (optional alias).
+struct FromItem {
     std::string table_name;
+    std::string alias;  // empty if no AS alias
+};
+
+// INNER JOIN right ON <expr> (left-deep chain off FromClause::base).
+struct JoinClause {
+    FromItem right;
+    std::unique_ptr<Expr> on;  // required
+};
+
+// FROM base [ INNER JOIN … ON … ]*
+struct FromClause {
+    FromItem base;
+    std::vector<JoinClause> joins;  // empty for single-table queries
 };
 
 struct SelectStmt {

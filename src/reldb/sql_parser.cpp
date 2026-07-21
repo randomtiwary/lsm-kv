@@ -63,8 +63,16 @@ enum class TokenKind : std::uint8_t {
     kTypeString,    // STRING
     kTypeBool,      // BOOL
     kTypeBoolean,   // BOOLEAN
-    // Unsupported keywords — recognized so we can give clear errors
+    // Join keywords
+    kInner,
     kJoin,
+    kOn,
+    kLeft,
+    kRight,
+    kFull,
+    kOuter,
+    kCross,
+    // Other keywords / unsupported statement starts
     kGroup,
     kHaving,
     kUnion,
@@ -90,6 +98,7 @@ enum class TokenKind : std::uint8_t {
     kLe,
     kGt,
     kGe,
+    kDot,
 };
 
 struct Token {
@@ -147,7 +156,14 @@ const char* TokenKindName(TokenKind k) {
         case TokenKind::kTypeString: return "STRING";
         case TokenKind::kTypeBool: return "BOOL";
         case TokenKind::kTypeBoolean: return "BOOLEAN";
+        case TokenKind::kInner: return "INNER";
         case TokenKind::kJoin: return "JOIN";
+        case TokenKind::kOn: return "ON";
+        case TokenKind::kLeft: return "LEFT";
+        case TokenKind::kRight: return "RIGHT";
+        case TokenKind::kFull: return "FULL";
+        case TokenKind::kOuter: return "OUTER";
+        case TokenKind::kCross: return "CROSS";
         case TokenKind::kGroup: return "GROUP";
         case TokenKind::kHaving: return "HAVING";
         case TokenKind::kUnion: return "UNION";
@@ -171,6 +187,7 @@ const char* TokenKindName(TokenKind k) {
         case TokenKind::kLe: return "<=";
         case TokenKind::kGt: return ">";
         case TokenKind::kGe: return ">=";
+        case TokenKind::kDot: return ".";
     }
     return "token";
 }
@@ -247,6 +264,10 @@ private:
             case '*':
                 ++pos_;
                 t.kind = TokenKind::kStar;
+                return t;
+            case '.':
+                ++pos_;
+                t.kind = TokenKind::kDot;
                 return t;
             case '=':
                 ++pos_;
@@ -425,12 +446,14 @@ private:
         if (lower == "string") return TokenKind::kTypeString;
         if (lower == "bool") return TokenKind::kTypeBool;
         if (lower == "boolean") return TokenKind::kTypeBoolean;
+        if (lower == "inner") return TokenKind::kInner;
         if (lower == "join") return TokenKind::kJoin;
-        if (lower == "inner" || lower == "left" || lower == "right" || lower == "full" ||
-            lower == "outer" || lower == "cross") {
-            // Treat join-ish keywords as unsupported JOIN family at parse sites.
-            return TokenKind::kJoin;
-        }
+        if (lower == "on") return TokenKind::kOn;
+        if (lower == "left") return TokenKind::kLeft;
+        if (lower == "right") return TokenKind::kRight;
+        if (lower == "full") return TokenKind::kFull;
+        if (lower == "outer") return TokenKind::kOuter;
+        if (lower == "cross") return TokenKind::kCross;
         if (lower == "group") return TokenKind::kGroup;
         if (lower == "having") return TokenKind::kHaving;
         if (lower == "union") return TokenKind::kUnion;
@@ -801,11 +824,7 @@ private:
         if (lex_.Check(TokenKind::kLParen)) {
             return lex_.Error("subqueries are not supported");
         }
-        RELDB_RETURN_NOT_OK(ParseIdent(&stmt.from.table_name));
-        // Reject JOIN after table.
-        if (lex_.Check(TokenKind::kJoin) || lex_.Check(TokenKind::kComma)) {
-            return lex_.Error("joins are not supported");
-        }
+        RELDB_RETURN_NOT_OK(ParseFromClause(&stmt.from));
 
         if (lex_.Match(TokenKind::kWhere)) {
             RELDB_RETURN_NOT_OK(ParseExpr(&stmt.where));
@@ -903,16 +922,53 @@ private:
         return STATUS(OK);
     }
 
-    // Identifiers: kIdent or type-name keywords used as names (edge case).
+    // Identifiers: kIdent only (reserved keywords are not names).
     lsmkv::Status ParseIdent(std::string* out) {
         if (lex_.Check(TokenKind::kIdent)) {
             *out = lex_.current().text;
             lex_.Advance();
             return STATUS(OK);
         }
-        // Only bare identifiers (kIdent); reserved keywords are not allowed as names.
         return lex_.Error(std::string("expected identifier, got ") +
                           TokenKindName(lex_.current().kind));
+    }
+
+    // name [ AS alias ]
+    lsmkv::Status ParseFromItem(FromItem* out) {
+        RELDB_RETURN_NOT_OK(ParseIdent(&out->table_name));
+        if (lex_.Match(TokenKind::kAs)) {
+            RELDB_RETURN_NOT_OK(ParseIdent(&out->alias));
+        }
+        return STATUS(OK);
+    }
+
+    // from_item ( INNER JOIN from_item ON expr )*
+    lsmkv::Status ParseFromClause(FromClause* out) {
+        RELDB_RETURN_NOT_OK(ParseFromItem(&out->base));
+        for (;;) {
+            if (lex_.Check(TokenKind::kComma)) {
+                return lex_.Error("comma joins are not supported; use INNER JOIN");
+            }
+            if (lex_.Check(TokenKind::kLeft) || lex_.Check(TokenKind::kRight) ||
+                lex_.Check(TokenKind::kFull) || lex_.Check(TokenKind::kCross) ||
+                lex_.Check(TokenKind::kOuter)) {
+                return lex_.Error("only INNER JOIN is supported");
+            }
+            // Bare JOIN without INNER is rejected (grammar requires INNER JOIN).
+            if (lex_.Check(TokenKind::kJoin)) {
+                return lex_.Error("use INNER JOIN … ON …");
+            }
+            if (!lex_.Match(TokenKind::kInner)) {
+                break;
+            }
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kJoin, "JOIN"));
+            JoinClause join;
+            RELDB_RETURN_NOT_OK(ParseFromItem(&join.right));
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kOn, "ON"));
+            RELDB_RETURN_NOT_OK(ParseExpr(&join.on));
+            out->joins.push_back(std::move(join));
+        }
+        return STATUS(OK);
     }
 
     lsmkv::Status ParseLiteralValue(Value* out) {
@@ -1070,8 +1126,15 @@ private:
                 return STATUS(OK);
             }
             case TokenKind::kIdent: {
+                // Column ref: name or qualifier.name (e.g. u.id for joins).
                 std::string name = lex_.current().text;
                 lex_.Advance();
+                if (lex_.Match(TokenKind::kDot)) {
+                    std::string field;
+                    RELDB_RETURN_NOT_OK(ParseIdent(&field));
+                    name += '.';
+                    name += field;
+                }
                 *out = Expr::Column(std::move(name));
                 return STATUS(OK);
             }

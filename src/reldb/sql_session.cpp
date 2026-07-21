@@ -388,8 +388,11 @@ lsmkv::Status EnsureAggSpec(const TableSchema& schema, AggFunc func, bool star,
 }  // namespace
 
 lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
+    // Multi-table joins parse; execution is not wired yet.
+    RELDB_FAIL_IF(!stmt.from.joins.empty(), InvalidArgument, "joins are not supported");
+
     TableSchema schema;
-    RELDB_RETURN_NOT_OK(LookupTable(stmt.from.table_name, &schema));
+    RELDB_RETURN_NOT_OK(LookupTable(stmt.from.base.table_name, &schema));
 
     bool has_agg = false;
     for (const auto& item : stmt.select_list) {
