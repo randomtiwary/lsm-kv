@@ -823,9 +823,13 @@ private:
                 return lex_.Error("empty GROUP BY list");
             }
         }
-        // HAVING is not supported yet (fields exist; parse later).
         if (lex_.Match(TokenKind::kHaving)) {
-            return lex_.Error("HAVING is not supported");
+            // HAVING expressions may reference group columns, aggregate output
+            // names, and agg call syntax rewritten to those names (COUNT(*) etc.).
+            having_context_ = true;
+            auto st = ParseExpr(&stmt.having);
+            having_context_ = false;
+            RELDB_RETURN_NOT_OK(st);
         }
         if (lex_.Match(TokenKind::kOrder)) {
             RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kBy, "BY"));
@@ -1033,6 +1037,26 @@ private:
             RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kRParen, "')'"));
             return STATUS(OK);
         }
+        // In HAVING, agg_func(...) is a reference to the aggregate result column.
+        if (having_context_ && IsAggFunc(lex_.current().kind)) {
+            const TokenKind func_tok = lex_.current().kind;
+            lex_.Advance();
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kLParen, "'('"));
+            const AggFunc func = TokenToAggFunc(func_tok);
+            bool star = false;
+            std::string col;
+            if (lex_.Match(TokenKind::kStar)) {
+                if (func_tok != TokenKind::kCount) {
+                    return lex_.Error("only COUNT(*) is allowed; use a column for other aggregates");
+                }
+                star = true;
+            } else {
+                RELDB_RETURN_NOT_OK(ParseIdent(&col));
+            }
+            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kRParen, "')'"));
+            *out = Expr::Column(DefaultAggResultName(func, star, col));
+            return STATUS(OK);
+        }
         // Literals
         switch (lex_.current().kind) {
             case TokenKind::kInteger:
@@ -1063,6 +1087,7 @@ private:
     }
 
     Lexer lex_;
+    bool having_context_ = false;
 };
 
 }  // namespace

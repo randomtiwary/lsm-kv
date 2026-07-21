@@ -71,6 +71,14 @@ enum class AggFunc : std::uint8_t {
     kMax = 4,
 };
 
+// Shared naming for aggregate result columns (parser HAVING rewrite + session).
+const char* AggFuncName(AggFunc f);
+// e.g. COUNT(*), SUM(score) — no AS alias.
+std::string DefaultAggResultName(AggFunc f, bool star, const std::string& col);
+// Inverse of DefaultAggResultName; returns false if name is not that form.
+bool ParseDefaultAggResultName(const std::string& name, AggFunc* f, bool* star,
+                               std::string* col);
+
 // One SELECT list item: a plain expression or an aggregate (COUNT/SUM/…).
 // Aggregates and output_name are filled when the parser/binder support them.
 struct SelectItem {

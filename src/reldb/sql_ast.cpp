@@ -1,5 +1,6 @@
 #include "reldb/sql_ast.h"
 
+#include <cctype>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -88,27 +89,10 @@ std::string ToStringInsert(const InsertStmt& s) {
     return out;
 }
 
-const char* AggFuncName(AggFunc f) {
-    switch (f) {
-        case AggFunc::kCount: return "COUNT";
-        case AggFunc::kSum: return "SUM";
-        case AggFunc::kAvg: return "AVG";
-        case AggFunc::kMin: return "MIN";
-        case AggFunc::kMax: return "MAX";
-    }
-    return "AGG";
-}
-
 std::string ToStringSelectItem(const SelectItem& item) {
     std::string out;
     if (item.kind == SelectItem::Kind::kAgg) {
-        out = std::string(AggFuncName(item.agg_func)) + "(";
-        if (item.agg_star) {
-            out += "*";
-        } else {
-            out += item.agg_column;
-        }
-        out += ")";
+        out = DefaultAggResultName(item.agg_func, item.agg_star, item.agg_column);
     } else {
         out = item.expr ? item.expr->ToString() : "?";
     }
@@ -179,6 +163,77 @@ std::string ToStringDelete(const DeleteStmt& s) {
 }
 
 }  // namespace
+
+const char* AggFuncName(AggFunc f) {
+    switch (f) {
+        case AggFunc::kCount: return "COUNT";
+        case AggFunc::kSum: return "SUM";
+        case AggFunc::kAvg: return "AVG";
+        case AggFunc::kMin: return "MIN";
+        case AggFunc::kMax: return "MAX";
+    }
+    return "AGG";
+}
+
+std::string DefaultAggResultName(AggFunc f, bool star, const std::string& col) {
+    std::string s = AggFuncName(f);
+    s += '(';
+    if (star) {
+        s += '*';
+    } else {
+        s += col;
+    }
+    s += ')';
+    return s;
+}
+
+bool ParseDefaultAggResultName(const std::string& name, AggFunc* f, bool* star,
+                               std::string* col) {
+    if (f == nullptr || star == nullptr || col == nullptr) return false;
+    auto starts = [&](const char* pfx) {
+        return name.compare(0, std::char_traits<char>::length(pfx), pfx) == 0;
+    };
+    AggFunc func = AggFunc::kCount;
+    const char* pfx = nullptr;
+    if (starts("COUNT(")) {
+        func = AggFunc::kCount;
+        pfx = "COUNT(";
+    } else if (starts("SUM(")) {
+        func = AggFunc::kSum;
+        pfx = "SUM(";
+    } else if (starts("AVG(")) {
+        func = AggFunc::kAvg;
+        pfx = "AVG(";
+    } else if (starts("MIN(")) {
+        func = AggFunc::kMin;
+        pfx = "MIN(";
+    } else if (starts("MAX(")) {
+        func = AggFunc::kMax;
+        pfx = "MAX(";
+    } else {
+        return false;
+    }
+    if (name.empty() || name.back() != ')') return false;
+    const std::size_t pfx_len = std::char_traits<char>::length(pfx);
+    if (name.size() < pfx_len + 1) return false;
+    const std::string inner = name.substr(pfx_len, name.size() - pfx_len - 1);
+    if (inner == "*") {
+        if (func != AggFunc::kCount) return false;
+        *f = func;
+        *star = true;
+        col->clear();
+        return true;
+    }
+    if (inner.empty()) return false;
+    // Column name: simple identifier (no spaces / ops).
+    for (char c : inner) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+    }
+    *f = func;
+    *star = false;
+    *col = inner;
+    return true;
+}
 
 std::string ToString(const Statement& stmt) {
     return std::visit(

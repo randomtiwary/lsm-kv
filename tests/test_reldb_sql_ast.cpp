@@ -104,6 +104,22 @@ TEST(reldb_sql_ast_select_print) {
               "full");
 }
 
+TEST(reldb_sql_ast_agg_result_name) {
+    expect_eq(reldb::DefaultAggResultName(reldb::AggFunc::kCount, true, ""),
+              std::string("COUNT(*)"), "count star");
+    expect_eq(reldb::DefaultAggResultName(reldb::AggFunc::kSum, false, "score"),
+              std::string("SUM(score)"), "sum");
+    reldb::AggFunc f;
+    bool star = false;
+    std::string col;
+    expect(reldb::ParseDefaultAggResultName("COUNT(*)", &f, &star, &col), "parse count");
+    expect(f == reldb::AggFunc::kCount, "f count");
+    expect(star, "star");
+    expect(reldb::ParseDefaultAggResultName("AVG(score)", &f, &star, &col), "parse avg");
+    expect(f == reldb::AggFunc::kAvg && !star && col == "score", "avg parts");
+    expect(!reldb::ParseDefaultAggResultName("n", &f, &star, &col), "not agg");
+}
+
 // SelectStmt shape: FromClause, SelectItem, group_by / having fields.
 TEST(reldb_sql_ast_select_stmt_shape) {
     reldb::SelectStmt sel;
