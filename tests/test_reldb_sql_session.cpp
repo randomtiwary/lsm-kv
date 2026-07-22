@@ -379,6 +379,85 @@ TEST(reldb_sql_session_joins_not_executed) {
     RemoveDirRecursive(dir);
 }
 
+// Single-table aliases and qualified columns resolve via BindContext.
+TEST(reldb_sql_session_table_alias_and_qualified) {
+    auto dir = MakeTempDir("reldb_sql_sess_alias");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        reldb::SqlSession session(db);
+        reldb::QueryResult r;
+
+        EXPECT_OK(session.Execute(
+                      "CREATE TABLE users(id INT PRIMARY KEY, name TEXT, score INT);", r),
+                  "create");
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (1, 'ada', 10);", r), "i1");
+        EXPECT_OK(session.Execute("INSERT INTO users VALUES (2, 'bob', 20);", r), "i2");
+
+        // AS alias + qualified select / WHERE (PK point path).
+        EXPECT_OK(session.Execute("SELECT u.id, u.name FROM users AS u WHERE u.id = 1;", r),
+                  "as alias");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "1 row");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(1), "id");
+        expect_eq(r.rows[0].at(1).GetString(), std::string("ada"), "ada");
+        expect_eq(r.column_names[0], std::string("id"), "out id");
+        expect(r.plan_tag.find("PkPointGet") != std::string::npos, "point");
+
+        // Bare correlation name.
+        EXPECT_OK(session.Execute("SELECT u.name FROM users u WHERE u.score > 10;", r),
+                  "bare alias");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "bob only");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("bob"), "bob");
+
+        // Table name as qualifier without alias.
+        EXPECT_OK(session.Execute("SELECT users.name FROM users WHERE users.id = 2;", r),
+                  "table qual");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("bob"), "bob2");
+
+        // GROUP BY with qualified names.
+        EXPECT_OK(session.Execute(
+                      "SELECT u.name, COUNT(*) FROM users u GROUP BY u.name ORDER BY u.name;", r),
+                  "gb qual");
+        expect_eq(static_cast<int>(r.rows.size()), 2, "2 groups");
+
+        // HAVING with qualified group key and qualified aggregate arg.
+        EXPECT_OK(session.Execute(
+                      "SELECT u.name, COUNT(*) FROM users u GROUP BY u.name "
+                      "HAVING u.name = 'ada';",
+                      r),
+                  "having qual group");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "ada only");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "ada name");
+
+        EXPECT_OK(session.Execute(
+                      "SELECT SUM(u.score) FROM users u HAVING SUM(u.score) > 0;", r),
+                  "having qual agg");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "one scalar");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(30), "sum 30");
+
+        // Mixed spellings dedupe: SELECT bare, HAVING qualified (and reverse).
+        EXPECT_OK(session.Execute(
+                      "SELECT SUM(score) FROM users u HAVING SUM(u.score) >= 30;", r),
+                  "mixed sum");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "mixed ok");
+        EXPECT_OK(session.Execute(
+                      "SELECT SUM(u.score) FROM users u HAVING SUM(score) >= 30;", r),
+                  "mixed sum rev");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "mixed rev ok");
+
+        // ORDER BY: exact AS alias wins; qual.col does not match a shadowing alias.
+        EXPECT_OK(session.Execute(
+                      "SELECT name AS id FROM users u WHERE u.id = 1 ORDER BY id;", r),
+                  "order by alias");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "alias out");
+        expect(session.Execute(
+                          "SELECT name AS id FROM users u WHERE u.id = 1 ORDER BY u.id;", r)
+                   .IsInvalidArgument(),
+               "order by u.id vs AS id");
+    }
+    RemoveDirRecursive(dir);
+}
+
 TEST(reldb_sql_session_pk_point_plan_tag) {
     auto dir = MakeTempDir("reldb_sql_sess_plan");
     {

@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 
+#include "reldb/bind_context.h"
 #include "reldb/executor.h"
 #include "lsmkv/debug.h"
 #include "reldb/macros.h"
@@ -347,10 +348,20 @@ lsmkv::Status SqlSession::PlanAccess(Transaction& txn, const TableSchema& schema
 
 namespace {
 
-// Final select-list name for an aggregate (alias if present).
-std::string AggSelectListName(const SelectItem& item) {
-    if (!item.alias.empty()) return item.alias;
-    return DefaultAggResultName(item.agg_func, item.agg_star, item.agg_column);
+// Resolve aggregate column arg to bare name + physical index (COUNT(*) → empty/-1).
+lsmkv::Status ResolveAggArg(const BindContext& ctx, bool star, const std::string& col,
+                            std::string* bare_col, int* arg_column) {
+    if (star) {
+        bare_col->clear();
+        *arg_column = -1;
+        return STATUS(OK);
+    }
+    BoundColumn bc;
+    RELDB_RETURN_NOT_OK(ctx.Resolve(col, &bc));
+    *bare_col = bc.column_name;
+    // Single-table today: column_index == row_offset; multi-table join exec is later.
+    *arg_column = bc.column_index;
+    return STATUS(OK);
 }
 
 void CollectColumnNames(const Expr* e, std::vector<std::string>* out) {
@@ -363,10 +374,16 @@ void CollectColumnNames(const Expr* e, std::vector<std::string>* out) {
     CollectColumnNames(e->right(), out);
 }
 
-// Add AggSpec if not already present under the same default result name.
-lsmkv::Status EnsureAggSpec(const TableSchema& schema, AggFunc func, bool star,
-                            const std::string& col, std::vector<AggSpec>* aggs) {
-    const std::string name = DefaultAggResultName(func, star, col);
+// Add AggSpec if not already present under the canonical default result name
+// (SUM(u.score) and SUM(score) both become SUM(score) after Resolve).
+lsmkv::Status EnsureAggSpec(const BindContext& ctx, AggFunc func, bool star,
+                            const std::string& col, std::vector<AggSpec>* aggs,
+                            std::string* canonical_name_out = nullptr) {
+    std::string bare_col;
+    int arg_column = -1;
+    RELDB_RETURN_NOT_OK(ResolveAggArg(ctx, star, col, &bare_col, &arg_column));
+    const std::string name = DefaultAggResultName(func, star, bare_col);
+    if (canonical_name_out != nullptr) *canonical_name_out = name;
     for (const auto& a : *aggs) {
         if (a.output_name == name) return STATUS(OK);
     }
@@ -375,14 +392,65 @@ lsmkv::Status EnsureAggSpec(const TableSchema& schema, AggFunc func, bool star,
     spec.star = star;
     spec.output_name = name;
     if (!star) {
-        const int cidx = schema.ColumnIndex(col);
-        if (cidx < 0) {
-            return STATUS(InvalidArgument, "unknown aggregate column: " + col);
-        }
-        spec.arg_column = cidx;
+        spec.arg_column = arg_column;
     }
     aggs->push_back(std::move(spec));
     return STATUS(OK);
+}
+
+// Rewrite HAVING column leaves so they match HashAggregate / agg_schema names:
+// group keys → bare column; default agg forms → canonical SUM(score) not SUM(u.score).
+lsmkv::Status NormalizeHavingColumns(Expr* having, const BindContext& ctx,
+                                     const std::vector<std::string>& group_bare) {
+    if (having == nullptr) return STATUS(OK);
+    return having->MapColumnNames([&](std::string* name) -> lsmkv::Status {
+        AggFunc f = AggFunc::kCount;
+        bool star = false;
+        std::string col;
+        if (ParseDefaultAggResultName(*name, &f, &star, &col)) {
+            std::string bare;
+            int arg = -1;
+            RELDB_RETURN_NOT_OK(ResolveAggArg(ctx, star, col, &bare, &arg));
+            *name = DefaultAggResultName(f, star, bare);
+            return STATUS(OK);
+        }
+        // Already a bare group key?
+        for (const auto& g : group_bare) {
+            if (g == *name) return STATUS(OK);
+        }
+        // Qualified group ref (u.name) → bare name.
+        BoundColumn bc;
+        if (ctx.Resolve(*name, &bc).ok()) {
+            for (const auto& g : group_bare) {
+                if (g == bc.column_name) {
+                    *name = bc.column_name;
+                    return STATUS(OK);
+                }
+            }
+        }
+        // Leave other names for Bind(agg_schema) / error path.
+        return STATUS(OK);
+    });
+}
+
+// ORDER BY: exact match on output labels first (includes AS aliases).
+// Bare-name fallback only for select items that projected a column without AS
+// (avoids SELECT name AS id … ORDER BY u.id matching the alias).
+int FindOutputColumn(const std::vector<std::string>& out_names,
+                     const std::vector<bool>& bare_fallback_ok, const std::string& name,
+                     const BindContext& ctx) {
+    for (std::size_t i = 0; i < out_names.size(); ++i) {
+        if (out_names[i] == name) return static_cast<int>(i);
+    }
+    BoundColumn bc;
+    if (!ctx.Resolve(name, &bc).ok()) return -1;
+    for (std::size_t i = 0; i < out_names.size(); ++i) {
+        if (i < bare_fallback_ok.size() && bare_fallback_ok[i] &&
+            out_names[i] == bc.column_name) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 }  // namespace
@@ -393,6 +461,10 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
 
     TableSchema schema;
     RELDB_RETURN_NOT_OK(LookupTable(stmt.from.base.table_name, &schema));
+
+    BindContext bind_ctx;
+    RELDB_RETURN_NOT_OK(
+        bind_ctx.AddTable(stmt.from.base.table_name, stmt.from.base.alias, schema));
 
     bool has_agg = false;
     for (const auto& item : stmt.select_list) {
@@ -411,6 +483,11 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         return STATUS(InvalidArgument, "HAVING requires aggregates or GROUP BY");
     }
 
+    // Normalize qualified column refs (u.id → id) before PK access-path matching.
+    if (stmt.where != nullptr) {
+        RELDB_RETURN_NOT_OK(stmt.where->Bind(bind_ctx));
+    }
+
     AutoTxnGuard auto_txn(*this);
     RELDB_RETURN_NOT_OK(auto_txn.Ensure());
 
@@ -421,6 +498,8 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
 
     // Projection / output names (for ORDER BY after the final Project).
     std::vector<std::string> out_names;
+    // True when ORDER BY qual.col may match this output via bare column name.
+    std::vector<bool> out_bare_fallback;
 
     if (!agg_plan) {
         // Non-aggregate SELECT (existing path).
@@ -430,6 +509,7 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
             std::vector<Projection> projs;
             projs.reserve(stmt.select_list.size());
             out_names.reserve(stmt.select_list.size());
+            out_bare_fallback.reserve(stmt.select_list.size());
             for (auto& item : stmt.select_list) {
                 RELDB_RETURN_IF(item.kind != SelectItem::Kind::kExpr,
                                 auto_txn.Complete(STATUS(InvalidArgument,
@@ -438,23 +518,25 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
                                 auto_txn.Complete(STATUS(InvalidArgument,
                                                          "null select expression")));
                 auto& e = item.expr;
+                RELDB_RETURN_NOT_OK(e->Bind(bind_ctx));
                 std::string name;
+                bool bare_ok = false;
                 if (!item.alias.empty()) {
                     name = item.alias;
                 } else if (e->kind() == Expr::Kind::kColumn) {
-                    name = e->column_name();
+                    name = e->column_name();  // bare after Bind(bind_ctx)
+                    bare_ok = true;
                 } else {
                     name = e->ToString();
                 }
-                RELDB_RETURN_NOT_OK(e->Bind(schema));
                 out_names.push_back(name);
+                out_bare_fallback.push_back(bare_ok);
                 projs.push_back(Projection{std::move(name), std::move(e)});
             }
             plan = std::make_unique<ProjectExecutor>(std::move(plan), schema, std::move(projs));
         } else {
-            for (const auto& c : schema.columns()) {
-                out_names.push_back(c.name);
-            }
+            out_names = bind_ctx.StarOutputNames();
+            out_bare_fallback.assign(out_names.size(), true);
         }
     } else {
         // Aggregate / GROUP BY path:
@@ -462,15 +544,17 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         RELDB_RETURN_IF(stmt.select_list.empty(),
                         auto_txn.Complete(STATUS(InvalidArgument, "empty SELECT list")));
 
-        // Resolve GROUP BY columns → indices into the input schema.
+        // Resolve GROUP BY columns → indices into the input schema (bare names).
         std::vector<int> group_indices;
+        std::vector<std::string> group_bare;
         group_indices.reserve(stmt.group_by.size());
+        group_bare.reserve(stmt.group_by.size());
         for (const auto& col : stmt.group_by) {
-            const int idx = schema.ColumnIndex(col);
-            RELDB_RETURN_IF(idx < 0,
-                            auto_txn.Complete(STATUS(InvalidArgument,
-                                                     "unknown GROUP BY column: " + col)));
-            group_indices.push_back(idx);
+            BoundColumn bc;
+            auto st = bind_ctx.Resolve(col, &bc);
+            RELDB_RETURN_IF(!st.ok(), auto_txn.Complete(st));
+            group_indices.push_back(bc.column_index);
+            group_bare.push_back(bc.column_name);
         }
 
         // Bind select list; collect unique AggSpecs by default result name.
@@ -479,54 +563,73 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         std::vector<std::string> select_sources;
         select_sources.reserve(stmt.select_list.size());
         out_names.reserve(stmt.select_list.size());
+        out_bare_fallback.reserve(stmt.select_list.size());
 
         for (auto& item : stmt.select_list) {
             if (item.kind == SelectItem::Kind::kAgg) {
+                std::string canonical;
                 {
-                    auto st = EnsureAggSpec(schema, item.agg_func, item.agg_star,
-                                           item.agg_column, &aggs);
+                    auto st = EnsureAggSpec(bind_ctx, item.agg_func, item.agg_star,
+                                           item.agg_column, &aggs, &canonical);
                     if (!st.ok()) return auto_txn.Complete(st);
                 }
-                const std::string def =
-                    DefaultAggResultName(item.agg_func, item.agg_star, item.agg_column);
-                select_sources.push_back(def);
-                out_names.push_back(AggSelectListName(item));
+                select_sources.push_back(canonical);
+                out_names.push_back(item.alias.empty() ? canonical : item.alias);
+                out_bare_fallback.push_back(false);
                 continue;
             }
 
-            // Non-aggregate: must be a bare column that appears in GROUP BY.
+            // Non-aggregate: must be a column that appears in GROUP BY.
             RELDB_RETURN_IF(item.expr == nullptr,
                             auto_txn.Complete(STATUS(InvalidArgument, "null select expression")));
             RELDB_RETURN_IF(item.expr->kind() != Expr::Kind::kColumn,
                             auto_txn.Complete(STATUS(
                                 InvalidArgument,
                                 "SELECT with aggregates requires GROUP BY columns or aggregates")));
-            const std::string& col = item.expr->column_name();
+            BoundColumn bc;
+            {
+                auto st = bind_ctx.Resolve(item.expr->column_name(), &bc);
+                if (!st.ok()) return auto_txn.Complete(st);
+            }
             bool in_group = false;
-            for (const auto& g : stmt.group_by) {
-                if (g == col) {
+            for (const auto& g : group_bare) {
+                if (g == bc.column_name) {
                     in_group = true;
                     break;
                 }
             }
-            // Scalar aggregate query (no GROUP BY): non-agg columns are illegal.
+            // Also accept an exact match on the original GROUP BY text.
+            if (!in_group) {
+                for (const auto& g : stmt.group_by) {
+                    if (g == item.expr->column_name()) {
+                        in_group = true;
+                        break;
+                    }
+                }
+            }
             RELDB_RETURN_IF(!in_group,
                             auto_txn.Complete(STATUS(
                                 InvalidArgument,
-                                "column must appear in GROUP BY: " + col)));
+                                "column must appear in GROUP BY: " + item.expr->column_name())));
             const std::string out =
-                !item.alias.empty() ? item.alias : col;
-            select_sources.push_back(col);  // HashAggregate names group cols from input
+                !item.alias.empty() ? item.alias : bc.column_name;
+            select_sources.push_back(bc.column_name);  // matches HashAggregate / scan names
             out_names.push_back(out);
+            out_bare_fallback.push_back(item.alias.empty());
         }
 
         // HAVING may reference aggregates not listed in the SELECT list; add them.
+        // Normalize qualified group keys and SUM(u.col) → SUM(col) before Bind.
         if (stmt.having != nullptr) {
+            {
+                auto st = NormalizeHavingColumns(stmt.having.get(), bind_ctx, group_bare);
+                if (!st.ok()) return auto_txn.Complete(st);
+            }
             std::vector<std::string> having_cols;
             CollectColumnNames(stmt.having.get(), &having_cols);
             for (const auto& cname : having_cols) {
                 bool is_group = false;
-                for (const auto& g : stmt.group_by) {
+                for (const auto& g : group_bare) {
                     if (g == cname) {
                         is_group = true;
                         break;
@@ -545,20 +648,17 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
                             cname));
                 }
                 {
-                    auto st = EnsureAggSpec(schema, f, star, col, &aggs);
+                    auto st = EnsureAggSpec(bind_ctx, f, star, col, &aggs);
                     if (!st.ok()) return auto_txn.Complete(st);
                 }
             }
         }
 
-        plan = std::make_unique<HashAggregateExecutor>(std::move(plan), std::move(group_indices),
-                                                       aggs);
-
         // Synthetic schema matching HashAggregate output: group keys then unique aggs.
         std::vector<ColumnDef> agg_cols;
         bool saw_pk = false;
-        for (const auto& gname : stmt.group_by) {
-            const int gidx = schema.ColumnIndex(gname);
+        for (std::size_t gi = 0; gi < group_bare.size(); ++gi) {
+            const int gidx = group_indices[gi];
             ColumnDef c = schema.columns()[static_cast<std::size_t>(gidx)];
             c.primary_key = !saw_pk;
             saw_pk = true;
@@ -574,6 +674,9 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         }
         TableSchema agg_schema(schema.name(), std::move(agg_cols));
         RELDB_RETURN_NOT_OK(agg_schema.Validate());
+
+        plan = std::make_unique<HashAggregateExecutor>(std::move(plan), std::move(group_indices),
+                                                       aggs);
 
         if (stmt.having != nullptr) {
             RELDB_RETURN_NOT_OK(stmt.having->Bind(agg_schema));
@@ -596,13 +699,8 @@ lsmkv::Status SqlSession::RunSelect(SelectStmt stmt, QueryResult& result) {
         std::vector<SortKey> keys;
         keys.reserve(stmt.order_by.size());
         for (const auto& o : stmt.order_by) {
-            int idx = -1;
-            for (std::size_t i = 0; i < out_names.size(); ++i) {
-                if (out_names[i] == o.column_name) {
-                    idx = static_cast<int>(i);
-                    break;
-                }
-            }
+            const int idx =
+                FindOutputColumn(out_names, out_bare_fallback, o.column_name, bind_ctx);
             RELDB_RETURN_IF(idx < 0,
                             auto_txn.Complete(STATUS(InvalidArgument,
                                                      "unknown ORDER BY column: " + o.column_name)));

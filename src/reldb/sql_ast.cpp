@@ -237,9 +237,16 @@ bool ParseDefaultAggResultName(const std::string& name, AggFunc* f, bool* star,
         return true;
     }
     if (inner.empty()) return false;
-    // Column name: simple identifier (no spaces / ops).
+    // Column name: identifier or qualifier.ident (no spaces / ops).
     for (char c : inner) {
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '.')) {
+            return false;
+        }
+    }
+    // Reject leading/trailing/double dots (same shape as BindContext::SplitColumnRef).
+    if (inner.front() == '.' || inner.back() == '.' ||
+        inner.find("..") != std::string::npos) {
+        return false;
     }
     *f = func;
     *star = false;
