@@ -114,7 +114,19 @@ std::string ToStringSelect(const SelectStmt& s) {
         }
         out += "[" + JoinComma(items) + "]";
     }
-    out += " FROM " + s.from.table_name;
+    out += " FROM ";
+    out += s.from.base.table_name;
+    if (!s.from.base.alias.empty()) {
+        out += " AS " + s.from.base.alias;
+    }
+    for (const auto& j : s.from.joins) {
+        out += " INNER JOIN " + j.right.table_name;
+        if (!j.right.alias.empty()) {
+            out += " AS " + j.right.alias;
+        }
+        out += " ON ";
+        out += j.on ? j.on->ToString() : "?";
+    }
     if (s.where) {
         out += " WHERE " + s.where->ToString();
     }

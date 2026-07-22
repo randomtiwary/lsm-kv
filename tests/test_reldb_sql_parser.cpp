@@ -188,7 +188,8 @@ TEST(reldb_sql_parse_select) {
     {
         const auto& sel = std::get<reldb::SelectStmt>(s);
         expect(sel.select_star, "star");
-        expect_eq(sel.from.table_name, std::string("users"), "table");
+        expect_eq(sel.from.base.table_name, std::string("users"), "table");
+        expect(sel.from.joins.empty(), "no joins");
         expect(sel.group_by.empty(), "no group by");
         expect(sel.having == nullptr, "no having");
         expect(sel.where == nullptr, "no where");
@@ -301,7 +302,21 @@ TEST(reldb_sql_parse_reject_unsupported) {
     reldb::Statement s;
     expect(reldb::ParseStatement("SELECT * FROM a JOIN b ON a.id = b.id", &s)
                .IsInvalidArgument(),
-           "join");
+           "bare join");
+    expect(reldb::ParseStatement("SELECT * FROM a LEFT JOIN b ON a.id = b.id", &s)
+               .IsInvalidArgument(),
+           "left join");
+    expect(reldb::ParseStatement("SELECT * FROM a RIGHT JOIN b ON a.id = b.id", &s)
+               .IsInvalidArgument(),
+           "right join");
+    expect(reldb::ParseStatement("SELECT * FROM a FULL JOIN b ON a.id = b.id", &s)
+               .IsInvalidArgument(),
+           "full join");
+    expect(reldb::ParseStatement("SELECT * FROM a CROSS JOIN b", &s).IsInvalidArgument(),
+           "cross join");
+    expect(reldb::ParseStatement("SELECT * FROM a OUTER JOIN b ON a.id = b.id", &s)
+               .IsInvalidArgument(),
+           "outer join");
     expect(reldb::ParseStatement("SELECT * FROM a, b", &s).IsInvalidArgument(), "comma join");
     expect(reldb::ParseStatement("SELECT DISTINCT name FROM t", &s).IsInvalidArgument(),
            "distinct");
@@ -318,6 +333,89 @@ TEST(reldb_sql_parse_reject_unsupported) {
     expect(reldb::ParseStatement("INSERT INTO t VALUES ('unterminated)", &s)
                .IsInvalidArgument(),
            "bad string");
+}
+
+TEST(reldb_sql_parse_inner_join) {
+    reldb::Statement s;
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT * FROM users INNER JOIN orders ON users.id = orders.uid", &s),
+              "join");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect_eq(sel.from.base.table_name, std::string("users"), "base");
+        expect_eq(static_cast<int>(sel.from.joins.size()), 1, "1 join");
+        expect_eq(sel.from.joins[0].right.table_name, std::string("orders"), "right");
+        expect(sel.from.joins[0].on != nullptr, "on");
+        expect_eq(reldb::ToString(s),
+                  std::string("Select(* FROM users INNER JOIN orders ON "
+                              "Compare(Eq, Column(users.id), Column(orders.uid)))"),
+                  "print");
+    }
+
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT u.id FROM users AS u INNER JOIN orders AS o ON u.id = o.uid",
+                  &s),
+              "aliases");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect_eq(sel.from.base.alias, std::string("u"), "u");
+        expect_eq(sel.from.joins[0].right.alias, std::string("o"), "o");
+        expect_eq(reldb::ToString(s),
+                  std::string("Select([Column(u.id)] FROM users AS u INNER JOIN orders AS o "
+                              "ON Compare(Eq, Column(u.id), Column(o.uid)))"),
+                  "print alias");
+    }
+
+    // Bare correlation names (no AS)
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT u.id FROM users u INNER JOIN orders o ON u.id = o.uid", &s),
+              "bare alias");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect_eq(sel.from.base.alias, std::string("u"), "bare u");
+        expect_eq(sel.from.joins[0].right.alias, std::string("o"), "bare o");
+    }
+
+    // Multi-join left-deep chain
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT * FROM a INNER JOIN b ON a.id = b.a_id "
+                  "INNER JOIN c ON b.id = c.b_id",
+                  &s),
+              "two joins");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect_eq(static_cast<int>(sel.from.joins.size()), 2, "2 joins");
+        expect_eq(reldb::ToString(s),
+                  std::string("Select(* FROM a INNER JOIN b ON "
+                              "Compare(Eq, Column(a.id), Column(b.a_id)) "
+                              "INNER JOIN c ON Compare(Eq, Column(b.id), Column(c.b_id)))"),
+                  "multi print");
+    }
+
+    // Qualified refs in agg / GROUP BY / ORDER BY (parse only)
+    EXPECT_OK(reldb::ParseStatement(
+                  "SELECT COUNT(u.id) FROM users u GROUP BY u.name ORDER BY u.name", &s),
+              "qual agg");
+    {
+        const auto& sel = std::get<reldb::SelectStmt>(s);
+        expect_eq(sel.select_list[0].agg_column, std::string("u.id"), "agg col");
+        expect_eq(sel.group_by[0], std::string("u.name"), "gb");
+        expect_eq(sel.order_by[0].column_name, std::string("u.name"), "ob");
+    }
+
+    // INNER JOIN requires ON; USING/NATURAL get a clear message
+    {
+        auto st = reldb::ParseStatement("SELECT * FROM a INNER JOIN b", &s);
+        expect(st.IsInvalidArgument(), "no on");
+        expect(st.ToString().find("ON") != std::string::npos, "no on msg");
+    }
+    {
+        auto st = reldb::ParseStatement("SELECT * FROM a INNER JOIN b USING (id)", &s);
+        expect(st.IsInvalidArgument(), "using");
+        expect(st.ToString().find("USING") != std::string::npos ||
+                   st.ToString().find("ON") != std::string::npos,
+               "using msg");
+    }
 }
 
 TEST(reldb_sql_parse_aggregates_and_group_by) {

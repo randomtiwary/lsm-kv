@@ -361,6 +361,24 @@ TEST(reldb_sql_session_aggregates_e2e) {
     RemoveDirRecursive(dir);
 }
 
+// Joins parse but are not executed yet.
+TEST(reldb_sql_session_joins_not_executed) {
+    auto dir = MakeTempDir("reldb_sql_sess_join");
+    {
+        auto db = OpenDb(dir);
+        expect(db != nullptr, "open");
+        reldb::SqlSession session(db);
+        reldb::QueryResult r;
+        EXPECT_OK(session.Execute("CREATE TABLE a(id INT PRIMARY KEY);", r), "ca");
+        EXPECT_OK(session.Execute("CREATE TABLE b(id INT PRIMARY KEY, a_id INT);", r), "cb");
+        expect(session.Execute(
+                          "SELECT * FROM a INNER JOIN b ON a.id = b.a_id;", r)
+                   .IsInvalidArgument(),
+               "join not exec");
+    }
+    RemoveDirRecursive(dir);
+}
+
 TEST(reldb_sql_session_pk_point_plan_tag) {
     auto dir = MakeTempDir("reldb_sql_sess_plan");
     {
