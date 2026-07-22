@@ -775,8 +775,8 @@ private:
                 }
                 item.agg_star = true;
             } else {
-                // Single column ref only (no SUM(a+b)).
-                RELDB_RETURN_NOT_OK(ParseIdent(&item.agg_column));
+                // Single column ref only (no SUM(a+b)); may be qualifier.col.
+                RELDB_RETURN_NOT_OK(ParseColumnRef(&item.agg_column));
                 item.agg_star = false;
             }
             RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kRParen, "')'"));
@@ -833,7 +833,7 @@ private:
             RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kBy, "BY"));
             for (;;) {
                 std::string col;
-                RELDB_RETURN_NOT_OK(ParseIdent(&col));
+                RELDB_RETURN_NOT_OK(ParseColumnRef(&col));
                 stmt.group_by.push_back(std::move(col));
                 if (lex_.Match(TokenKind::kComma)) continue;
                 break;
@@ -854,7 +854,7 @@ private:
             RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kBy, "BY"));
             for (;;) {
                 OrderByItem item;
-                RELDB_RETURN_NOT_OK(ParseIdent(&item.column_name));
+                RELDB_RETURN_NOT_OK(ParseColumnRef(&item.column_name));
                 if (lex_.Match(TokenKind::kDesc)) {
                     item.ascending = false;
                 } else {
@@ -933,10 +933,25 @@ private:
                           TokenKindName(lex_.current().kind));
     }
 
-    // name [ AS alias ]
+    // name | qualifier.name  (stored as "name" or "qualifier.name")
+    lsmkv::Status ParseColumnRef(std::string* out) {
+        RELDB_RETURN_NOT_OK(ParseIdent(out));
+        if (lex_.Match(TokenKind::kDot)) {
+            std::string field;
+            RELDB_RETURN_NOT_OK(ParseIdent(&field));
+            *out += '.';
+            *out += field;
+        }
+        return STATUS(OK);
+    }
+
+    // name [ [ AS ] alias ]
     lsmkv::Status ParseFromItem(FromItem* out) {
         RELDB_RETURN_NOT_OK(ParseIdent(&out->table_name));
         if (lex_.Match(TokenKind::kAs)) {
+            RELDB_RETURN_NOT_OK(ParseIdent(&out->alias));
+        } else if (lex_.Check(TokenKind::kIdent)) {
+            // Bare correlation name: FROM users u  (clause keywords are not kIdent).
             RELDB_RETURN_NOT_OK(ParseIdent(&out->alias));
         }
         return STATUS(OK);
@@ -964,7 +979,9 @@ private:
             RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kJoin, "JOIN"));
             JoinClause join;
             RELDB_RETURN_NOT_OK(ParseFromItem(&join.right));
-            RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kOn, "ON"));
+            if (!lex_.Match(TokenKind::kOn)) {
+                return lex_.Error("INNER JOIN requires ON (USING/NATURAL not supported)");
+            }
             RELDB_RETURN_NOT_OK(ParseExpr(&join.on));
             out->joins.push_back(std::move(join));
         }
@@ -1107,7 +1124,7 @@ private:
                 }
                 star = true;
             } else {
-                RELDB_RETURN_NOT_OK(ParseIdent(&col));
+                RELDB_RETURN_NOT_OK(ParseColumnRef(&col));
             }
             RELDB_RETURN_NOT_OK(lex_.Expect(TokenKind::kRParen, "')'"));
             *out = Expr::Column(DefaultAggResultName(func, star, col));
@@ -1127,14 +1144,8 @@ private:
             }
             case TokenKind::kIdent: {
                 // Column ref: name or qualifier.name (e.g. u.id for joins).
-                std::string name = lex_.current().text;
-                lex_.Advance();
-                if (lex_.Match(TokenKind::kDot)) {
-                    std::string field;
-                    RELDB_RETURN_NOT_OK(ParseIdent(&field));
-                    name += '.';
-                    name += field;
-                }
+                std::string name;
+                RELDB_RETURN_NOT_OK(ParseColumnRef(&name));
                 *out = Expr::Column(std::move(name));
                 return STATUS(OK);
             }
