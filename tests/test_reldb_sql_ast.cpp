@@ -117,6 +117,9 @@ TEST(reldb_sql_ast_agg_result_name) {
     expect(star, "star");
     expect(reldb::ParseDefaultAggResultName("AVG(score)", &f, &star, &col), "parse avg");
     expect(f == reldb::AggFunc::kAvg && !star && col == "score", "avg parts");
+    expect(reldb::ParseDefaultAggResultName("SUM(u.score)", &f, &star, &col), "parse qual");
+    expect(f == reldb::AggFunc::kSum && !star && col == "u.score", "qual parts");
+    expect(!reldb::ParseDefaultAggResultName("SUM(.score)", &f, &star, &col), "bad dot");
     expect(!reldb::ParseDefaultAggResultName("n", &f, &star, &col), "not agg");
 }
 

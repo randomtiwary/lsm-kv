@@ -419,6 +419,41 @@ TEST(reldb_sql_session_table_alias_and_qualified) {
                       "SELECT u.name, COUNT(*) FROM users u GROUP BY u.name ORDER BY u.name;", r),
                   "gb qual");
         expect_eq(static_cast<int>(r.rows.size()), 2, "2 groups");
+
+        // HAVING with qualified group key and qualified aggregate arg.
+        EXPECT_OK(session.Execute(
+                      "SELECT u.name, COUNT(*) FROM users u GROUP BY u.name "
+                      "HAVING u.name = 'ada';",
+                      r),
+                  "having qual group");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "ada only");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "ada name");
+
+        EXPECT_OK(session.Execute(
+                      "SELECT SUM(u.score) FROM users u HAVING SUM(u.score) > 0;", r),
+                  "having qual agg");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "one scalar");
+        expect_eq(r.rows[0].at(0).GetInt64(), static_cast<std::int64_t>(30), "sum 30");
+
+        // Mixed spellings dedupe: SELECT bare, HAVING qualified (and reverse).
+        EXPECT_OK(session.Execute(
+                      "SELECT SUM(score) FROM users u HAVING SUM(u.score) >= 30;", r),
+                  "mixed sum");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "mixed ok");
+        EXPECT_OK(session.Execute(
+                      "SELECT SUM(u.score) FROM users u HAVING SUM(score) >= 30;", r),
+                  "mixed sum rev");
+        expect_eq(static_cast<int>(r.rows.size()), 1, "mixed rev ok");
+
+        // ORDER BY: exact AS alias wins; qual.col does not match a shadowing alias.
+        EXPECT_OK(session.Execute(
+                      "SELECT name AS id FROM users u WHERE u.id = 1 ORDER BY id;", r),
+                  "order by alias");
+        expect_eq(r.rows[0].at(0).GetString(), std::string("ada"), "alias out");
+        expect(session.Execute(
+                          "SELECT name AS id FROM users u WHERE u.id = 1 ORDER BY u.id;", r)
+                   .IsInvalidArgument(),
+               "order by u.id vs AS id");
     }
     RemoveDirRecursive(dir);
 }

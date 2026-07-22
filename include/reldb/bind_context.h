@@ -38,8 +38,10 @@ struct BoundColumn {
 // alias.col or table.col. Duplicate correlation names are rejected at AddTable.
 class BindContext {
 public:
-    // Append a FROM item + its catalog schema. Registers table_name and alias
-    // (if set and different) as qualifier keys.
+    // Append a FROM item + its catalog schema. Registers table_name and, when
+    // different, alias as qualifier keys (SQLite/MySQL-style: both users.id and
+    // u.id work after FROM users AS u). Self-joins of the same table name will
+    // need a correlation-only model later; BindContext is built per statement.
     lsmkv::Status AddTable(std::string table_name, std::string alias, TableSchema schema);
 
     // Resolve "col" or "qual.col". Errors: unknown table/column, ambiguous.
