@@ -150,6 +150,31 @@ lsmkv::Status Expr::Bind(const TableSchema& schema) {
     return STATUS(InvalidArgument, "unknown expr kind");
 }
 
+lsmkv::Status Expr::Bind(const BindContext& ctx) {
+    switch (kind_) {
+        case Kind::kLiteral:
+            return STATUS(OK);
+        case Kind::kColumn: {
+            BoundColumn bc;
+            RELDB_RETURN_NOT_OK(ctx.Resolve(column_name_, &bc));
+            column_index_ = bc.row_offset;
+            column_name_ = bc.column_name;  // bare name for PK matchers / labels
+            return STATUS(OK);
+        }
+        case Kind::kCompare:
+            RELDB_RETURN_NOT_OK(left_->Bind(ctx));
+            RELDB_RETURN_NOT_OK(right_->Bind(ctx));
+            return STATUS(OK);
+        case Kind::kLogic:
+            RELDB_RETURN_NOT_OK(left_->Bind(ctx));
+            if (logic_op_ != LogicOp::kNot) {
+                RELDB_RETURN_NOT_OK(right_->Bind(ctx));
+            }
+            return STATUS(OK);
+    }
+    return STATUS(InvalidArgument, "unknown expr kind");
+}
+
 lsmkv::Status Expr::Eval(const Row& row, const TableSchema& schema, Value* out) const {
     if (out == nullptr) return STATUS(InvalidArgument, "null out");
     switch (kind_) {

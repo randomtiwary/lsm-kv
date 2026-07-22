@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "lsmkv/status.h"
+#include "reldb/bind_context.h"
 #include "reldb/row.h"
 #include "reldb/schema.h"
 #include "reldb/types.h"
@@ -83,6 +84,11 @@ public:
 
     // Resolve column names to indices for schema. Safe to call more than once.
     lsmkv::Status Bind(const TableSchema& schema);
+
+    // Resolve against a multi-table BindContext. Sets column_index_ to the
+    // concatenated row offset and rewrites column_name_ to the bare column
+    // (so single-table PK matchers still see "id", not "u.id").
+    lsmkv::Status Bind(const BindContext& ctx);
 
     // Evaluate to a Value (including Bool for predicates, Null for unknown).
     lsmkv::Status Eval(const Row& row, const TableSchema& schema, Value* out) const;
